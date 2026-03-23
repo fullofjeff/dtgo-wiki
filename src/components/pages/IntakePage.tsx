@@ -213,6 +213,18 @@ function ClarificationCell({ idx, options, initial, onChange }: {
   );
 }
 
+/** Ensure an IntakeResult has all required fields with safe defaults */
+function normalizeResult(r: any): IntakeResult {
+  if (!r || typeof r !== 'object') return { summary: '', matches: [], newFiles: [], conflicts: [] };
+  return {
+    summary: r.summary || '',
+    matches: Array.isArray(r.matches) ? r.matches : [],
+    newFiles: Array.isArray(r.newFiles) ? r.newFiles.map((f: any) => typeof f === 'string' ? f : (f.path || f.name || JSON.stringify(f))) : [],
+    conflicts: Array.isArray(r.conflicts) ? r.conflicts.map((c: any) => typeof c === 'string' ? c : (c.original || c.description || JSON.stringify(c))) : [],
+    clarifications: Array.isArray(r.clarifications) ? r.clarifications : undefined,
+  };
+}
+
 export function IntakePage() {
   const [text, setText] = useState('');
   const [systemInstructions, setSystemInstructions] = useState('');
@@ -240,7 +252,7 @@ export function IntakePage() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; session: IntakeSession } | null>(null);
   const [conflictResolutions, setConflictResolutions] = useState<Record<number, string>>({});
   const [stagedConflicts, setStagedConflicts] = useState<Set<number>>(new Set());
-  const [successModal, setSuccessModal] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<{ title: string; subtitle: string } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch providers and seed localStorage
@@ -271,12 +283,12 @@ export function IntakePage() {
 
   useEffect(() => { loadPastSessions(); }, [loadPastSessions]);
 
-  // Auto-dismiss success modal
+  // Auto-dismiss success message
   useEffect(() => {
-    if (!successModal) return;
-    const t = setTimeout(() => setSuccessModal(false), 3000);
+    if (!successMessage) return;
+    const t = setTimeout(() => setSuccessMessage(null), 3000);
     return () => clearTimeout(t);
-  }, [successModal]);
+  }, [successMessage]);
 
   // Polling for background processing
   useEffect(() => {
@@ -286,7 +298,7 @@ export function IntakePage() {
         const res = await fetch(`/api/intake/session/${sessionId}`);
         const session = await res.json();
         if (session.status === 'ready') {
-          setResult(session.result);
+          setResult(normalizeResult(session.result));
           setProcessing(false);
           clearInterval(pollRef.current!);
           loadPastSessions();
@@ -324,7 +336,7 @@ export function IntakePage() {
       const data = await res.json();
       if (data.sessionId) {
         setSessionId(data.sessionId);
-        setSuccessModal(true);
+        setSuccessMessage({ title: 'Submitted Successfully', subtitle: 'Processing in background. Results will appear in your session history.' });
         setText('');
         setSystemInstructions('');
         setProcessing(false);
@@ -380,6 +392,7 @@ export function IntakePage() {
     if (!sessionId) return;
     setApplying(true);
     setApplyResult(null);
+    setSuccessMessage({ title: 'Changes Submitted', subtitle: 'Applying approved changes and refining with your answers...' });
 
     try {
       // Step 1: Apply approved matches if any
@@ -410,7 +423,7 @@ export function IntakePage() {
 
         // If nothing to refine, reload and stop
         if (!hasRefineData) {
-          if (data.applied > 0) setTimeout(() => window.location.reload(), 2000);
+          if (data.applied > 0) loadPastSessions();
           return;
         }
       }
@@ -433,8 +446,8 @@ export function IntakePage() {
         if (!res.ok) {
           setError(`Refine failed: ${await res.text()}`);
         } else {
-          const newResult: IntakeResult = await res.json();
-          setResult(newResult);
+          const newResult = await res.json();
+          setResult(normalizeResult(newResult));
           setApprovedItems(new Set());
           setRejectedItems(new Set());
           setClarificationAnswers({});
@@ -456,7 +469,7 @@ export function IntakePage() {
       const session = await res.json();
       setSessionId(session.id);
       if (session.result) {
-        setResult(session.result);
+        setResult(normalizeResult(session.result));
         setApprovedItems(new Set(Object.entries(session.approvals || {}).filter(([,v]) => v === 'approved').map(([k]) => Number(k))));
         setRejectedItems(new Set(Object.entries(session.approvals || {}).filter(([,v]) => v === 'rejected').map(([k]) => Number(k))));
         setError(null);
@@ -704,6 +717,13 @@ export function IntakePage() {
 
         if (isDupe) return <Badge variant="info">Skip</Badge>;
 
+        if (reprocessing || applying) return (
+          <div className="flex items-center gap-1">
+            <Loader2 size={14} className="animate-spin" style={{ color: 'var(--jf-lavender)' }} />
+            <span style={{ fontSize: '10px', color: 'var(--jf-lavender)', fontWeight: 600 }}>Reprocessing</span>
+          </div>
+        );
+
         if (isApproved) return (
           <div className="flex items-center gap-1">
             <Badge variant="selected">Approved</Badge>
@@ -724,8 +744,10 @@ export function IntakePage() {
           </div>
         );
 
+        const isEdited = idx in contentEdits;
         return (
           <div className="flex items-center gap-1">
+            {isEdited && <Badge variant="warning">Edited</Badge>}
             <button onClick={() => handleApprove(idx)} title="Approve" style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
               borderRadius: '6px', background: 'rgba(16, 163, 127, 0.1)', border: '1px solid rgba(16, 163, 127, 0.25)',
@@ -740,7 +762,7 @@ export function IntakePage() {
         );
       },
     },
-  ], [approvedItems, rejectedItems]);
+  ], [approvedItems, rejectedItems, contentEdits, clarificationAnswers, applying, reprocessing]);
 
   // ── Past sessions columns ──
 
@@ -904,7 +926,7 @@ export function IntakePage() {
       )}
 
       {/* Success modal */}
-      <Modal.Root open={successModal} onClose={() => setSuccessModal(false)}>
+      <Modal.Root open={successMessage !== null} onClose={() => setSuccessMessage(null)}>
         <Modal.Overlay />
         <Modal.Content size="sm">
           <Modal.Body>
@@ -913,17 +935,17 @@ export function IntakePage() {
                 <Check size={40} style={{ color: 'var(--dtgo-green, #4ade80)' }} />
               </div>
               <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '8px' }}>
-                Submitted Successfully
+                {successMessage?.title}
               </div>
               <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                Processing in background. Results will appear in your session history.
+                {successMessage?.subtitle}
               </div>
             </div>
           </Modal.Body>
           <Modal.Footer>
             <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
               <button
-                onClick={() => setSuccessModal(false)}
+                onClick={() => setSuccessMessage(null)}
                 style={{
                   padding: '8px 32px',
                   background: 'var(--jf-lavender)',
@@ -987,7 +1009,7 @@ export function IntakePage() {
                 actions={
                   <div className="flex items-center gap-3">
                     <button onClick={handleApproveAll}
-                      disabled={approvedItems.size >= result.matches.filter(m => !m.isDuplicate).length}
+                      disabled={approvedItems.size >= (result.matches ?? []).filter(m => !m.isDuplicate).length}
                       style={{
                         display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
                         fontSize: '12px', fontWeight: 600, background: 'rgba(16, 163, 127, 0.1)',
@@ -1029,6 +1051,7 @@ export function IntakePage() {
                   if (row.isDuplicate) return { opacity: 0.4 };
                   if (approvedItems.has(idx)) return { borderLeft: '3px solid rgba(16, 163, 127, 0.5)', opacity: 0.7 };
                   if (rejectedItems.has(idx)) return { borderLeft: '3px solid var(--dtp-pink)', opacity: 0.4 };
+                  if (idx in contentEdits) return { borderLeft: '3px solid var(--jf-gold)' };
                   return undefined;
                 }}
               />
@@ -1044,7 +1067,7 @@ export function IntakePage() {
           )}
 
           {/* New Files */}
-          {result.newFiles.length > 0 && (
+          {result.newFiles?.length > 0 && (
             <>
               <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--tnb-orange)', fontWeight: 600, marginBottom: '12px', marginTop: '24px' }}>
                 New Files Suggested
@@ -1052,14 +1075,14 @@ export function IntakePage() {
               {result.newFiles.map((f, i) => (
                 <div key={i} className="wiki-card" style={{ padding: '16px 24px', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <Plus size={16} style={{ color: 'var(--tnb-orange)' }} />
-                  <span style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{f}</span>
+                  <span style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{typeof f === 'string' ? f : JSON.stringify(f)}</span>
                 </div>
               ))}
             </>
           )}
 
           {/* Conflicts */}
-          {result.conflicts.length > 0 && (
+          {result.conflicts?.length > 0 && (
             <>
               <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--dtp-pink)', fontWeight: 600, marginBottom: '12px', marginTop: '24px' }}>
                 Conflicts Detected
@@ -1068,7 +1091,7 @@ export function IntakePage() {
                 <div key={i} className="wiki-card" style={{ padding: '16px 24px', marginBottom: '8px', borderLeft: '3px solid var(--dtp-pink)' }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '10px' }}>
                     <AlertTriangle size={16} style={{ color: 'var(--dtp-pink)', flexShrink: 0, marginTop: '2px' }} />
-                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{c}</span>
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{typeof c === 'string' ? c : JSON.stringify(c)}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <input

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 export interface BadgeProps {
-    variant: 'default' | 'selected' | 'info';
+    variant: 'default' | 'selected' | 'info' | 'warning';
     children: ReactNode;
     className?: string;
 }
@@ -25,6 +25,11 @@ const variantStyles = {
         backgroundColor: 'rgba(255,255,255,0.05)',
         color: 'rgba(255,255,255,0.6)',
         border: '1px solid rgba(255,255,255,0.1)',
+    },
+    warning: {
+        backgroundColor: 'rgba(199,165,93,0.15)',
+        color: 'var(--jf-gold, #c7a55d)',
+        border: '1px solid rgba(199,165,93,0.3)',
     },
 };
 

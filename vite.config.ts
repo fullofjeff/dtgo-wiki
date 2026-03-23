@@ -703,6 +703,11 @@ Return ONLY valid JSON, no markdown fences.`;
           const apiData = await apiRes.json();
           const content = providerConfigs.claude.extractText(apiData);
           const parsed = parseAiJson(content);
+          // Ensure required fields have safe defaults (AI may omit empty arrays)
+          parsed.matches = Array.isArray(parsed.matches) ? parsed.matches : [];
+          parsed.newFiles = Array.isArray(parsed.newFiles) ? parsed.newFiles : [];
+          parsed.conflicts = Array.isArray(parsed.conflicts) ? parsed.conflicts : [];
+          parsed.summary = parsed.summary || '';
 
           // Append clarification answers to the source document
           const answerText = Object.entries(clarificationAnswers || {})
