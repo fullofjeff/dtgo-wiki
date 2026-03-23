@@ -36,7 +36,7 @@ const providerConfigs: Record<string, ProviderConfig> = {
       init: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model, max_tokens: 4096, system: systemPrompt, messages: [{ role: 'user', content: userText }] }),
+        body: JSON.stringify({ model, max_tokens: 16384, system: systemPrompt, messages: [{ role: 'user', content: userText }] }),
       },
     }),
     extractText: (data: any) => data.content?.[0]?.text || '{}',
@@ -60,7 +60,7 @@ const providerConfigs: Record<string, ProviderConfig> = {
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
           body: JSON.stringify({
             model,
-            ...(isReasoning ? { max_completion_tokens: 4096 } : { max_tokens: 4096 }),
+            ...(isReasoning ? { max_completion_tokens: 16384 } : { max_tokens: 16384 }),
             messages: [
               { role: isReasoning ? 'developer' : 'system', content: systemPrompt },
               { role: 'user', content: userText },
@@ -88,7 +88,7 @@ const providerConfigs: Record<string, ProviderConfig> = {
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ parts: [{ text: userText }] }],
-          generationConfig: { maxOutputTokens: 4096 },
+          generationConfig: { maxOutputTokens: 16384 },
         }),
       },
     }),
@@ -113,7 +113,7 @@ const providerConfigs: Record<string, ProviderConfig> = {
             model,
             ...(isReasoning
               ? { reasoning_effort: 'high' }
-              : { max_tokens: 4096 }),
+              : { max_tokens: 16384 }),
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userText },
@@ -364,8 +364,31 @@ async function readBody(req: any): Promise<any> {
 // ── Parse AI JSON response ──
 
 function parseAiJson(text: string): any {
-  const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  return JSON.parse(cleaned);
+  let cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+  // Extract JSON object if wrapped in other text
+  const jsonStart = cleaned.indexOf('{');
+  const jsonEnd = cleaned.lastIndexOf('}');
+  if (jsonStart >= 0 && jsonEnd > jsonStart) cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+  // Fix trailing commas before } or ]
+  cleaned = cleaned.replace(/,\s*([\]}])/g, '$1');
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // Fix unescaped newlines/tabs inside JSON string values
+    let fixed = '';
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (escape) { fixed += ch; escape = false; continue; }
+      if (ch === '\\' && inString) { fixed += ch; escape = true; continue; }
+      if (ch === '"') { inString = !inString; fixed += ch; continue; }
+      if (inString && ch === '\n') { fixed += '\\n'; continue; }
+      if (inString && ch === '\t') { fixed += '\\t'; continue; }
+      fixed += ch;
+    }
+    return JSON.parse(fixed);
+  }
 }
 
 // ── Vite plugin ──
@@ -404,7 +427,7 @@ function intakeApiPlugin(): Plugin {
         if (req.url === '/api/intake/sessions') {
           const sessions = readArchive().map(s => ({
             id: s.id, timestamp: s.timestamp, provider: s.provider, model: s.model,
-            status: s.status, sourceExcerpt: s.sourceExcerpt,
+            status: s.status, sourceExcerpt: s.sourceExcerpt, error: s.error,
             matchCount: s.result?.matches?.length || 0,
             conflictCount: s.result?.conflicts?.length || 0,
             approvals: s.approvals, appliedAt: s.appliedAt,
@@ -421,6 +444,19 @@ function intakeApiPlugin(): Plugin {
         if (!session) { res.statusCode = 404; res.end('Session not found'); return; }
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify(session));
+      });
+
+      // DELETE /api/intake/session/:id
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'DELETE') return next();
+        const match = req.url?.match(/^\/api\/intake\/session\/([a-f0-9-]+)/);
+        if (!match) return next();
+        const sessions = readArchive();
+        const filtered = sessions.filter(s => s.id !== match[1]);
+        if (filtered.length === sessions.length) { res.statusCode = 404; res.end('Session not found'); return; }
+        writeArchive(filtered);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ deleted: true }));
       });
 
       // POST /api/intake/apply — with pre-apply validation
@@ -444,14 +480,17 @@ function intakeApiPlugin(): Plugin {
           const match = session.result.matches[idx];
           if (!match) continue;
 
-          let filePath = path.join(KB_DIR, `${match.file}.md`);
+          // Normalize: strip .md extension and leading _ (models sometimes include them)
+          const fileSlug = (match.file || '').replace(/\.md$/, '').replace(/(^|\/)_/g, '$1');
+
+          let filePath = path.join(KB_DIR, `${fileSlug}.md`);
           if (!fs.existsSync(filePath)) {
             // Try _prefix (e.g., _index.md)
-            const alt = path.join(KB_DIR, `_${match.file}.md`);
+            const alt = path.join(KB_DIR, `_${fileSlug}.md`);
             if (fs.existsSync(alt)) filePath = alt;
             // Try as directory with _index.md (e.g., people → people/_index.md)
             else {
-              const dirIndex = path.join(KB_DIR, match.file, '_index.md');
+              const dirIndex = path.join(KB_DIR, fileSlug, '_index.md');
               if (fs.existsSync(dirIndex)) filePath = dirIndex;
               else { validationResults.push({ index: idx, valid: false, issues: ['File not found'], applied: false }); continue; }
             }
@@ -516,7 +555,7 @@ function intakeApiPlugin(): Plugin {
           let contentToApply = contentEdits[String(idx)] ?? match.content ?? match.description ?? '';
           if (haiku) {
             try {
-              const valPrompt = `You are a knowledge base quality checker. Validate this proposed addition.
+              const valPrompt = `You are a knowledge base quality checker. Validate and FIX this proposed addition.
 
 EXISTING SECTION CONTENT:
 ${sectionContent || '(section does not exist yet — will be created)'}
@@ -526,11 +565,13 @@ ${match.content}
 
 SCHEMA RULES:
 - Person entries MUST use: ### Name — Role, Org\\n\\n\`Tag\` · \`Org\`\\n\\nNarrative prose paragraphs\\n\\n**Sources:** citation
-- NEVER bullet-point lists for person entries
+- NEVER bullet-point lists for person entries — convert to prose if found
 - Check if this person/entity already exists in the section (DUPLICATE check)
 
+IMPORTANT: You MUST always return fixedContent. If there are format issues, rewrite the content to comply with schema rules. Never return null for fixedContent — always provide a corrected version. Preserve ALL factual information from the original — never discard data, only reformat it. Issues should be informational warnings, not rejection reasons.
+
 Return ONLY valid JSON:
-{ "valid": true/false, "issues": ["list of problems found"], "fixedContent": "corrected content if format issues — or null if no fix needed" }`;
+{ "valid": true/false, "issues": ["list of warnings"], "fixedContent": "corrected content — ALWAYS provide this, even if only minor changes needed" }`;
 
               const valRes = await fetch('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
@@ -548,8 +589,8 @@ Return ONLY valid JSON:
                     contentToApply = valJson.fixedContent;
                     validationResults.push({ index: idx, valid: true, issues: valJson.issues || [], applied: true });
                   } else {
-                    validationResults.push({ index: idx, valid: false, issues: valJson.issues || ['Validation failed'], applied: false });
-                    continue; // Skip this match
+                    // No fixedContent — apply original anyway, issues are warnings not rejections
+                    validationResults.push({ index: idx, valid: true, issues: valJson.issues || [], applied: true });
                   }
                 } else {
                   validationResults.push({ index: idx, valid: true, issues: [], applied: true });
@@ -610,7 +651,7 @@ Return ONLY valid JSON:
         if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
         try {
         const body = await readBody(req);
-        const { sessionId, clarificationAnswers, contentEdits = {} } = body;
+        const { sessionId, clarificationAnswers, conflictResolutions = {}, contentEdits = {} } = body;
         const sessions = readArchive();
         const session = sessions.find(s => s.id === sessionId);
         if (!session?.result || !session.sourceText) { res.statusCode = 404; res.end('Session not found'); return; }
@@ -633,10 +674,13 @@ ${JSON.stringify(clarificationAnswers, null, 2)}
 USER'S CONTENT EDITS (the user manually modified these match contents — preserve their changes):
 ${Object.keys(contentEdits).length > 0 ? JSON.stringify(contentEdits, null, 2) : 'None'}
 
+USER'S CONFLICT RESOLUTIONS (the user provided guidance on how to resolve conflicts — follow their instructions):
+${Object.keys(conflictResolutions).length > 0 ? JSON.stringify(conflictResolutions, null, 2) : 'None'}
+
 MASTER INDEX:
 ${JSON.stringify(masterIndex, null, 2)}
 
-Now return a refined JSON result with the SAME structure. Replace any clarification items with concrete matches based on the user's answers. Do NOT include a "clarifications" array — all ambiguities should now be resolved.
+Now return a refined JSON result with the SAME structure. Replace any clarification items with concrete matches based on the user's answers. Resolve conflicts using the user's guidance — update the "conflicts" array to remove resolved ones and convert them to concrete matches where appropriate. Do NOT include a "clarifications" array — all ambiguities should now be resolved.
 
 Return ONLY valid JSON, no markdown fences.`;
 
@@ -855,6 +899,16 @@ Rules:
             }
 
             const apiData = await apiRes.json();
+
+            // Detect truncated responses before attempting JSON parse
+            const truncated = apiData.stop_reason === 'max_tokens'
+              || apiData.choices?.[0]?.finish_reason === 'length'
+              || apiData.candidates?.[0]?.finishReason === 'MAX_TOKENS';
+            if (truncated) {
+              updateSession(sessionId, { status: 'error', error: 'Response truncated — input text may be too long. Try a shorter excerpt.' });
+              return;
+            }
+
             const content = cfg.extractText(apiData);
             const parsed = parseAiJson(content);
 

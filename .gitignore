@@ -1,4 +1,10 @@
 node_modules
 dist
+.env
 .env.local
+.env.*.local
 .vite
+
+# Firebase service account (contains private keys!)
+firebase-service-account.json
+**/firebase-service-account.json

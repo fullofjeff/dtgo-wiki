@@ -34,3 +34,12 @@ export interface PersonRecord {
   bio?: string;           // markdown body from people.md ### section (if exists)
   mentions: PersonMention[];
 }
+
+export interface EntityRecord {
+  canonicalName: string;
+  aliases: string[];
+  slug: string | null;     // KB file slug, or null if no dedicated page
+  scope: string;
+  description: string;     // first paragraph from KB file
+  accentColor?: string;    // brand color token
+}

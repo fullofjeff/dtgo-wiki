@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Chrono } from 'react-chrono';
-import 'react-chrono/dist/style.css';
+import root from 'react-shadow';
+import chronoStyles from 'react-chrono/dist/style.css?raw';
 import { Link } from 'react-router-dom';
 import { Home, ChevronRight, Pencil, X, Check, ExternalLink, Trash2, Plus } from 'lucide-react';
 import { ToolbarButton } from '../tab-ui/ToolbarButton';
@@ -246,7 +247,50 @@ export function TimelinePage() {
       </h1>
 
       {/* Timeline */}
-      <div className="chrono-container" style={{ width: '100%' }}>
+      <root.div style={{ width: '100%' }}>
+        <style>{chronoStyles}</style>
+        <style>{`
+          /* Dark theme overrides inside Shadow DOM */
+          :host { display: block; background: transparent; }
+          .chrono-container, .chrono-container div, .chrono-container section, .chrono-container article {
+            background-color: transparent !important;
+            color: #f8f3e8 !important;
+          }
+          [class*="TimelineCard"] {
+            background: #1a1a1a !important;
+            color: #f8f3e8 !important;
+            border-radius: 14px !important;
+            border: 1px solid rgba(255,255,255,0.06) !important;
+          }
+          [class*="CardTitle"], [class*="card-title"], h3 {
+            color: #ebe7c7 !important;
+            font-weight: 600 !important;
+          }
+          [class*="CardDescription"], [class*="card-description"], p {
+            color: rgba(248, 243, 232, 0.5) !important;
+            font-weight: 300 !important;
+            font-size: 13px !important;
+            line-height: 1.6 !important;
+          }
+          [class*="TimelinePoint"], [class*="Point"] {
+            background: #d8830a !important;
+            border-color: #d8830a !important;
+          }
+          [class*="TimelineTitle"], [class*="Title"] {
+            color: #ebe7c7 !important;
+            font-weight: 600 !important;
+          }
+          [class*="active"] [class*="TimelineTitle"] {
+            color: #d8830a !important;
+          }
+          [class*="Track"] {
+            background: rgba(216, 131, 10, 0.25) !important;
+          }
+          [class*="ShowMore"], .show-more, [class*="Toolbar"] {
+            display: none !important;
+          }
+        `}</style>
+        <div className="chrono-container">
         {chronoItems.length > 0 && (
           <Chrono
             items={chronoItems}
@@ -327,7 +371,8 @@ export function TimelinePage() {
             })}
           </Chrono>
         )}
-      </div>
+        </div>
+      </root.div>
 
       {/* Event Modal */}
       <Modal.Root open={!!selected} onClose={closeModal}>

@@ -1,6 +1,6 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search } from 'lucide-react';
+import { Search, Loader2 } from 'lucide-react';
 import { search } from '@/data/search';
 import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut';
 import { useClickOutside } from '@/hooks/useClickOutside';
@@ -9,10 +9,12 @@ import type { SearchResult } from '@/data/types';
 export function SearchBar() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const navigate = useNavigate();
 
   useKeyboardShortcut({
@@ -30,17 +32,34 @@ export function SearchBar() {
     enabled: open,
   });
 
-  const handleChange = (value: string) => {
-    setQuery(value);
-    if (value.trim()) {
-      setResults(search(value, 8));
-      setOpen(true);
-      setSelected(0);
-    } else {
+  // Debounced async search
+  useEffect(() => {
+    if (!query.trim()) {
       setResults([]);
       setOpen(false);
+      setLoading(false);
+      return;
     }
-  };
+
+    setLoading(true);
+    clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(() => {
+      let cancelled = false;
+      search(query, 8).then((r) => {
+        if (!cancelled) {
+          setResults(r);
+          setOpen(true);
+          setSelected(0);
+          setLoading(false);
+        }
+      });
+
+      return () => { cancelled = true; };
+    }, 300);
+
+    return () => clearTimeout(debounceRef.current);
+  }, [query]);
 
   const goToResult = useCallback((r: SearchResult) => {
     navigate(`/file/${r.file}${r.headingId ? `#${r.headingId}` : ''}`);
@@ -64,16 +83,19 @@ export function SearchBar() {
           ref={inputRef}
           type="text"
           value={query}
-          onChange={e => handleChange(e.target.value)}
+          onChange={e => setQuery(e.target.value)}
           onFocus={() => query && setOpen(true)}
           onKeyDown={handleKeyDown}
           placeholder="Search... (⌘K)"
           className="search-input"
         />
+        {loading && (
+          <Loader2 size={14} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-[var(--text-placeholder)]" />
+        )}
       </div>
 
       {open && results.length > 0 && (
-        <div className="search-dropdown absolute bottom-full left-0 right-0 mb-2 z-[100]">
+        <div className="search-dropdown absolute top-full left-0 right-0 mt-2 z-[100]">
           {results.map((r, i) => (
             <div
               key={`${r.file}-${r.headingId}-${i}`}

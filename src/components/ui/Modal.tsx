@@ -78,7 +78,7 @@ function ModalContent({ children, size = 'md', className = '' }: ModalContentPro
         leaveTo="opacity-0 scale-95"
       >
         <DialogPanel
-          className={twMerge(`relative w-full ${sizeClasses[size]} bg-[#1a1a1a] border border-[#333] rounded-xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden`, className)}
+          className={twMerge(`relative w-full ${sizeClasses[size]} bg-[#1a1a1a] border border-[#333] rounded-xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden select-text`, className)}
         >
           {children}
         </DialogPanel>
@@ -122,7 +122,7 @@ function ModalTitle({ children, className = '' }: { children: React.ReactNode; c
 
 function ModalBody({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={twMerge('flex-1 overflow-y-auto p-6 space-y-6', className)}>
+    <div className={twMerge('flex-1 overflow-y-auto p-6 space-y-6 select-text', className)}>
       {children}
     </div>
   );

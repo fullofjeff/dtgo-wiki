@@ -1,19 +1,44 @@
+import { useState, useEffect } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { search } from '@/data/search';
-import { Search } from 'lucide-react';
+import { Search, Loader2 } from 'lucide-react';
+import type { SearchResult } from '@/data/types';
 
 export function SearchPage() {
   const [params] = useSearchParams();
   const query = params.get('q') || '';
-  const results = search(query, 30);
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults([]);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+
+    search(query, 30).then((r) => {
+      if (!cancelled) {
+        setResults(r);
+        setLoading(false);
+      }
+    });
+
+    return () => { cancelled = true; };
+  }, [query]);
 
   return (
     <div>
       <h1 className="text-xl font-semibold text-[var(--jf-cream)] mb-6">
         Search results for "{query}"
+        {loading && (
+          <Loader2 size={16} className="inline-block ml-2 animate-spin text-[var(--jf-lavender)]" />
+        )}
       </h1>
 
-      {results.length === 0 ? (
+      {!loading && results.length === 0 ? (
         <div className="flex flex-col items-center py-20 text-[var(--text-secondary)]">
           <Search size={48} className="mb-4 opacity-15" />
           <p>No results found</p>

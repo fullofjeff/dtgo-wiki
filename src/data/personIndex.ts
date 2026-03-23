@@ -151,8 +151,9 @@ function buildPersonIndex(): { lookup: Map<string, PersonRecord>; records: Perso
     }
   }
 
-  // Pass 2: Scan bold mentions across all files
+  // Pass 2: Scan bold mentions across all files (skip people/ — bios already handled by Pass 1)
   for (const file of files) {
+    if (file.slug.startsWith('people/') || file.slug === 'people') continue;
     const boldRegex = /\*\*([^*]+)\*\*/g;
     let match;
     while ((match = boldRegex.exec(file.content)) !== null) {

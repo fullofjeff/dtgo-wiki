@@ -40,7 +40,8 @@ const highlightStats: Record<string, Array<{ label: string; value: string }>> = 
 
 
 export function FilePage() {
-  const { slug } = useParams<{ slug: string }>();
+  const params = useParams();
+  const slug = params['*'] || '';
   const location = useLocation();
   const file = slug ? getFile(slug) : undefined;
 

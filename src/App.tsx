@@ -15,7 +15,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route element={<RequireAuth><Shell /></RequireAuth>}>
         <Route index element={<HomePage />} />
-        <Route path="file/:slug" element={<FilePage />} />
+        <Route path="file/*" element={<FilePage />} />
         <Route path="search" element={<SearchPage />} />
         <Route path="org-chart" element={<OrgChartPage />} />
         <Route path="timeline" element={<TimelinePage />} />

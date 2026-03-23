@@ -6,6 +6,8 @@ import {
   TreePine, Cloud, Briefcase, FileText, Network, Inbox
 } from 'lucide-react';
 
+const businessUnitSlugs = new Set(['mqdc', 'tnb', 'dtp', 'forestias', 'cloud11', 'projects']);
+
 const iconMap: Record<string, typeof Building2> = {
   index: Building2,
   mqdc: Building2,
@@ -14,7 +16,7 @@ const iconMap: Record<string, typeof Building2> = {
   forestias: TreePine,
   cloud11: Cloud,
   projects: FolderOpen,
-  people: Users,
+  'people/index': Users,
   history: Clock,
   partnerships: Handshake,
 };
@@ -28,7 +30,7 @@ const shortLabels: Record<string, string> = {
   forestias: 'The Forestias',
   cloud11: 'Cloud 11',
   projects: 'Other Projects',
-  people: 'Key People',
+  'people/index': 'Key People',
   history: 'Timeline',
   partnerships: 'Partnerships',
 };
@@ -98,7 +100,35 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         onClick={() => navigate('/intake')}
       />
 
-      {/* Section label */}
+      {/* Business Units */}
+      {!collapsed && (
+        <div style={{
+          padding: '16px 24px 8px',
+          fontSize: '0.6rem',
+          textTransform: 'uppercase',
+          letterSpacing: '2px',
+          color: 'rgba(248,243,232,0.3)',
+          fontWeight: 600,
+        }}>
+          Business Units
+        </div>
+      )}
+      {files.filter(f => businessUnitSlugs.has(f.slug)).map(file => {
+        const Icon = iconMap[file.slug] || FileText;
+        const isActive = location.pathname === `/file/${file.slug}`;
+        return (
+          <SidebarMenuItem
+            key={file.slug}
+            icon={Icon}
+            label={shortLabels[file.slug] || file.title}
+            isActive={isActive}
+            collapsed={collapsed}
+            onClick={() => navigate(`/file/${file.slug}`)}
+          />
+        );
+      })}
+
+      {/* Knowledge Base */}
       {!collapsed && (
         <div style={{
           padding: '16px 24px 8px',
@@ -111,13 +141,10 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
           Knowledge Base
         </div>
       )}
-
-      {/* Menu items */}
       <div className="flex-1 overflow-y-auto">
-        {files.filter(f => f.slug !== 'history').map(file => {
+        {files.filter(f => !businessUnitSlugs.has(f.slug) && f.slug !== 'history' && (!f.slug.includes('/') || f.slug.endsWith('/index'))).map(file => {
           const Icon = iconMap[file.slug] || FileText;
           const isActive = location.pathname === `/file/${file.slug}`;
-
           return (
             <SidebarMenuItem
               key={file.slug}

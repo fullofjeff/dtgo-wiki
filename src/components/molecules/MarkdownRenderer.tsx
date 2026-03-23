@@ -1,12 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Components } from 'react-markdown';
 import { SectionModal } from './SectionModal';
 import { PersonModal } from './PersonModal';
+import { EntityModal } from './EntityModal';
 import { SourceModal } from './SourceModal';
+import { FormSection } from '@/components/ui/FormSection';
 import { getPersonNames, getPersonRecord } from '@/data/personIndex';
-import type { PersonRecord } from '@/data/types';
+import { getEntityNames, getEntityRecord } from '@/data/entityIndex';
+import type { PersonRecord, EntityRecord } from '@/data/types';
 
 function slugify(text: string): string {
   return text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').trim();
@@ -46,27 +49,130 @@ function extractSection(md: string, heading: string, level: number): string {
   return out.join('\n').trim();
 }
 
+/** H1 sections whose h2 children should render as collapsible FormSections */
+const FORM_SECTION_PARENTS = new Set(['IP Portfolio', 'Subsidiaries & Internal Units']);
+
+type ContentSegment =
+  | { type: 'markdown'; content: string }
+  | { type: 'formSection'; title: string; description: string; body: string };
+
+/** Split markdown into renderable segments, extracting FormSection blocks */
+function splitIntoSegments(md: string): ContentSegment[] {
+  const lines = md.split('\n');
+  const segments: ContentSegment[] = [];
+  let currentLines: string[] = [];
+  let currentH1 = '';
+
+  let i = 0;
+  while (i < lines.length) {
+    const h1Match = lines[i].match(/^#\s+(.+)$/);
+    if (h1Match) {
+      currentH1 = h1Match[1].trim();
+      currentLines.push(lines[i]);
+      i++;
+      continue;
+    }
+
+    const h2Match = lines[i].match(/^##\s+(.+)$/);
+    if (h2Match && FORM_SECTION_PARENTS.has(currentH1)) {
+      // Flush accumulated markdown
+      if (currentLines.length > 0) {
+        const content = currentLines.join('\n').trim();
+        if (content) segments.push({ type: 'markdown', content });
+        currentLines = [];
+      }
+
+      const title = h2Match[1].trim();
+      const sectionBody = extractSection(md, title, 2);
+
+      // Extract inline badge description from first line (e.g. `180+ Countries` · `35+ Languages`)
+      const bodyLines = sectionBody.split('\n');
+      let description = '';
+      let bodyContent = sectionBody;
+      if (bodyLines[0] && /^`[^`]+`/.test(bodyLines[0])) {
+        description = bodyLines[0].replace(/`/g, '').trim();
+        bodyContent = bodyLines.slice(2).join('\n').trim(); // skip badge line + blank line
+      }
+
+      segments.push({ type: 'formSection', title, description, body: bodyContent });
+
+      // Skip past this h2 section in the source lines
+      i++;
+      while (i < lines.length) {
+        const nextH = lines[i].match(/^(#{1,2})\s/);
+        if (nextH && nextH[1].length <= 2) break;
+        i++;
+      }
+    } else {
+      currentLines.push(lines[i]);
+      i++;
+    }
+  }
+
+  // Flush remaining
+  if (currentLines.length > 0) {
+    const content = currentLines.join('\n').trim();
+    if (content) segments.push({ type: 'markdown', content });
+  }
+
+  return segments;
+}
+
 
 export function MarkdownRenderer({ content }: { content: string }) {
   const [sectionModal, setSectionModal] = useState<{ title: string; body: string } | null>(null);
   const [personModal, setPersonModal] = useState<PersonRecord | null>(null);
+  const [entityModal, setEntityModal] = useState<EntityRecord | null>(null);
   const [sourceModalPrefix, setSourceModalPrefix] = useState<string | null>(null);
   const personNameSet = useMemo(() => new Set(getPersonNames()), []);
+  const entityNameSet = useMemo(() => new Set(getEntityNames()), []);
 
-  function handleClick(children: unknown, level: number) {
-    const text = textContent(children);
-    const body = extractSection(content, text, level);
-    if (body) {
-      setSectionModal({ title: text, body });
-    }
-  }
+  const segments = useMemo(() => splitIntoSegments(content), [content]);
 
-  function handlePersonClick(name: string) {
-    const record = getPersonRecord(name);
-    if (record) {
-      setPersonModal(record);
+  // Single delegated click handler — no onClick on individual elements
+  const handleProseClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    // Don't interfere with text selection
+    const sel = window.getSelection();
+    if (sel && sel.toString().length > 0) return;
+
+    const target = e.target as HTMLElement;
+
+    // Check if clicked a person link
+    const personLink = target.closest('.person-link') as HTMLElement | null;
+    if (personLink) {
+      const name = personLink.textContent || '';
+      const record = getPersonRecord(name);
+      if (record) setPersonModal(record);
+      return;
     }
-  }
+
+    // Check if clicked an entity link
+    const entityLink = target.closest('.entity-link') as HTMLElement | null;
+    if (entityLink) {
+      const name = entityLink.textContent || '';
+      const record = getEntityRecord(name);
+      if (record) setEntityModal(record);
+      return;
+    }
+
+    // Check if clicked an intake source line
+    const sourceLine = target.closest('.intake-source-line') as HTMLElement | null;
+    if (sourceLine) {
+      const prefix = sourceLine.dataset.intakePrefix;
+      if (prefix) setSourceModalPrefix(prefix);
+      return;
+    }
+
+    // Check if clicked a heading (h2 or h3)
+    const heading = target.closest('h2, h3') as HTMLElement | null;
+    if (heading) {
+      const level = heading.tagName === 'H2' ? 2 : 3;
+      const text = heading.textContent || '';
+      const body = extractSection(content, text, level);
+      if (body) setSectionModal({ title: text, body });
+      return;
+    }
+  }, [content]);
 
   const components: Components = {
     h1: ({ children }) => <h1 id={slugify(textContent(children))}>{children}</h1>,
@@ -74,7 +180,6 @@ export function MarkdownRenderer({ content }: { content: string }) {
     h2: ({ children }) => (
       <h2
         id={slugify(textContent(children))}
-        onClick={() => handleClick(children, 2)}
         style={{ cursor: 'pointer' }}
       >
         {children}
@@ -84,7 +189,6 @@ export function MarkdownRenderer({ content }: { content: string }) {
     h3: ({ children }) => (
       <h3
         id={slugify(textContent(children))}
-        onClick={() => handleClick(children, 3)}
         style={{ cursor: 'pointer', fontWeight: 700 }}
       >
         {children}
@@ -94,20 +198,10 @@ export function MarkdownRenderer({ content }: { content: string }) {
     strong: ({ children }) => {
       const text = textContent(children);
       if (personNameSet.has(text)) {
-        return (
-          <strong
-            onClick={(e) => {
-              e.stopPropagation();
-              handlePersonClick(text);
-            }}
-            onKeyDown={(e) => { if (e.key === 'Enter') handlePersonClick(text); }}
-            className="person-link"
-            role="button"
-            tabIndex={0}
-          >
-            {children}
-          </strong>
-        );
+        return <strong className="person-link">{children}</strong>;
+      }
+      if (entityNameSet.has(text)) {
+        return <strong className="entity-link">{children}</strong>;
       }
       return <strong>{children}</strong>;
     },
@@ -128,11 +222,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
         const prefix = intakeMatch[1];
         return (
           <p
-            role="button"
-            tabIndex={0}
-            onClick={() => setSourceModalPrefix(prefix)}
-            onKeyDown={(e) => { if (e.key === 'Enter') setSourceModalPrefix(prefix); }}
-            style={{ cursor: 'pointer', transition: 'color 0.15s' }}
+            data-intake-prefix={prefix}
             className="intake-source-line"
             title="Click to view original source"
           >
@@ -144,11 +234,32 @@ export function MarkdownRenderer({ content }: { content: string }) {
     },
   };
 
+  const processedContent = (md: string) =>
+    md.replace(/\[intake:([a-f0-9]+)\]/g, '[](intake-source:$1)');
+
   return (
     <>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {content.replace(/\[intake:([a-f0-9]+)\]/g, '[](intake-source:$1)')}
-      </ReactMarkdown>
+      {/* Single delegated click handler on wrapper — no onClick on child elements */}
+      <div onClick={handleProseClick}>
+        {segments.map((seg, i) => {
+          if (seg.type === 'formSection') {
+            return (
+              <FormSection key={i} title={seg.title} description={seg.description}>
+                <div className="prose">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                    {processedContent(seg.body)}
+                  </ReactMarkdown>
+                </div>
+              </FormSection>
+            );
+          }
+          return (
+            <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={components}>
+              {processedContent(seg.content)}
+            </ReactMarkdown>
+          );
+        })}
+      </div>
 
       <SectionModal
         open={sectionModal !== null}
@@ -161,6 +272,12 @@ export function MarkdownRenderer({ content }: { content: string }) {
         open={personModal !== null}
         onClose={() => setPersonModal(null)}
         person={personModal}
+      />
+
+      <EntityModal
+        open={entityModal !== null}
+        onClose={() => setEntityModal(null)}
+        entity={entityModal}
       />
 
       <SourceModal

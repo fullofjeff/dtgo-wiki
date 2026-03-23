@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { getAllFiles } from '@/data/loader';
-import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Check, X, CheckCheck, ChevronDown, Clock, ArrowRight, Pencil } from 'lucide-react';
+import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Check, X, CheckCheck, ChevronDown, Clock, ArrowRight, Pencil, Trash2, RotateCcw, ExternalLink } from 'lucide-react';
 import { ModelChip } from '@/components/model/ModelChip';
 import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
@@ -234,6 +234,11 @@ export function IntakePage() {
   clarificationAnswersRef.current = clarificationAnswers;
   const [applyResult, setApplyResult] = useState<string | null>(null);
   const [pastSessions, setPastSessions] = useState<IntakeSession[]>([]);
+  const [sourceModalText, setSourceModalText] = useState<string | null>(null);
+  const [sourceModalLoading, setSourceModalLoading] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; session: IntakeSession } | null>(null);
+  const [conflictResolutions, setConflictResolutions] = useState<Record<number, string>>({});
+  const [stagedConflicts, setStagedConflicts] = useState<Set<number>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch providers and seed localStorage
@@ -331,6 +336,8 @@ export function IntakePage() {
     setApplyResult(null);
     setContentEdits({});
     setEditingIdx(null);
+    setConflictResolutions({});
+    setStagedConflicts(new Set());
   };
 
   const handleApprove = (index: number) => {
@@ -350,36 +357,79 @@ export function IntakePage() {
     setRejectedItems(new Set());
   };
 
-  const handleApply = async () => {
-    if (!sessionId || approvedItems.size === 0) return;
+  // Derived state for smart button
+  const hasStagedAnswers = Object.values(clarificationAnswersRef.current).some(v => v.selected || v.note);
+  const hasStagedConflicts = Object.values(conflictResolutions).some(v => v.trim());
+  const hasContentEdits = Object.keys(contentEdits).length > 0;
+  const hasRefineData = hasStagedAnswers || hasStagedConflicts || hasContentEdits;
+
+  const handleApplyAndRefine = async () => {
+    if (!sessionId) return;
     setApplying(true);
     setApplyResult(null);
-    try {
-      const approvals: Record<string, 'approved' | 'rejected'> = {};
-      approvedItems.forEach(i => { approvals[String(i)] = 'approved'; });
-      rejectedItems.forEach(i => { approvals[String(i)] = 'rejected'; });
 
-      const res = await fetch('/api/intake/apply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, approvals, contentEdits }),
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        setApplyResult(`Error: ${errText}`);
-        return;
+    try {
+      // Step 1: Apply approved matches if any
+      if (approvedItems.size > 0) {
+        const approvals: Record<string, 'approved' | 'rejected'> = {};
+        approvedItems.forEach(i => { approvals[String(i)] = 'approved'; });
+        rejectedItems.forEach(i => { approvals[String(i)] = 'rejected'; });
+
+        const res = await fetch('/api/intake/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, approvals, contentEdits }),
+        });
+        if (!res.ok) {
+          setApplyResult(`Error: ${await res.text()}`);
+          return;
+        }
+        const data = await res.json();
+        if (data.error) {
+          setApplyResult(`Error: ${data.error}`);
+          return;
+        }
+        const skippedMsg = data.skipped > 0 ? ` (${data.skipped} skipped by validation)` : '';
+        const issues = (data.validationResults || []).filter((v: any) => !v.applied && v.issues?.length);
+        const issueMsg = issues.length > 0 ? '\n' + issues.map((v: any) => `Match ${v.index}: ${v.issues.join(', ')}`).join('\n') : '';
+        setApplyResult(`Applied ${data.applied} change(s) and committed to git.${skippedMsg}${issueMsg}`);
+        loadPastSessions();
+
+        // If nothing to refine, reload and stop
+        if (!hasRefineData) {
+          if (data.applied > 0) setTimeout(() => window.location.reload(), 2000);
+          return;
+        }
       }
-      const data = await res.json();
-      if (data.error) {
-        setApplyResult(`Error: ${data.error}`);
-        return;
+
+      // Step 2: Refine with clarification answers and conflict resolutions
+      if (hasRefineData) {
+        setApplyResult(prev => (prev ? prev + ' Refining...' : 'Refining with your answers...'));
+        setReprocessing(true);
+
+        const res = await fetch('/api/intake/reprocess', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            clarificationAnswers: clarificationAnswersRef.current,
+            conflictResolutions,
+            contentEdits,
+          }),
+        });
+        if (!res.ok) {
+          setError(`Refine failed: ${await res.text()}`);
+        } else {
+          const newResult: IntakeResult = await res.json();
+          setResult(newResult);
+          setApprovedItems(new Set());
+          setRejectedItems(new Set());
+          setClarificationAnswers({});
+          setConflictResolutions({});
+          setApplyResult(null);
+        }
+        setReprocessing(false);
       }
-      const skippedMsg = data.skipped > 0 ? ` (${data.skipped} skipped by validation)` : '';
-      const issues = (data.validationResults || []).filter((v: any) => !v.applied && v.issues?.length);
-      const issueMsg = issues.length > 0 ? '\n' + issues.map((v: any) => `Match ${v.index}: ${v.issues.join(', ')}`).join('\n') : '';
-      setApplyResult(`Applied ${data.applied} change(s) and committed to git.${skippedMsg}${issueMsg} Reloading...`);
-      if (data.applied > 0) setTimeout(() => window.location.reload(), 2000);
-      loadPastSessions();
     } catch (err) {
       setApplyResult(`Error: ${err instanceof Error ? err.message : 'Apply failed'}`);
     } finally {
@@ -387,47 +437,95 @@ export function IntakePage() {
     }
   };
 
-  const handleReprocess = async () => {
-    if (!sessionId) return;
-    setReprocessing(true);
-    try {
-      const res = await fetch('/api/intake/reprocess', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, clarificationAnswers: clarificationAnswersRef.current, contentEdits }),
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        setError(`Reprocess failed: ${errText}`);
-      } else {
-        const newResult: IntakeResult = await res.json();
-        setResult(newResult);
-        setApprovedItems(new Set());
-        setRejectedItems(new Set());
-        setClarificationAnswers({});
-        setApplyResult(null);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Reprocess failed');
-    } finally {
-      setReprocessing(false);
-    }
-  };
-
   const loadSession = async (id: string) => {
     try {
       const res = await fetch(`/api/intake/session/${id}`);
-      const session: IntakeSession = await res.json();
+      const session = await res.json();
+      setSessionId(session.id);
       if (session.result) {
         setResult(session.result);
-        setSessionId(session.id);
         setApprovedItems(new Set(Object.entries(session.approvals || {}).filter(([,v]) => v === 'approved').map(([k]) => Number(k))));
         setRejectedItems(new Set(Object.entries(session.approvals || {}).filter(([,v]) => v === 'rejected').map(([k]) => Number(k))));
         setError(null);
         setApplyResult(session.appliedAt ? `Applied on ${new Date(session.appliedAt).toLocaleString()}` : null);
+      } else {
+        setResult(null);
+        setApprovedItems(new Set());
+        setRejectedItems(new Set());
+        setError(session.error || 'Processing failed — no results returned');
+        setApplyResult(null);
       }
     } catch { /* ignore */ }
   };
+
+  const showSourceForSession = async (id: string) => {
+    setSourceModalLoading(true);
+    try {
+      const res = await fetch(`/api/intake/session/${id}`);
+      const session = await res.json();
+      setSourceModalText(session.sourceText || session.sourceExcerpt || 'No source text available');
+    } catch {
+      setSourceModalText('Failed to load source text');
+    } finally {
+      setSourceModalLoading(false);
+    }
+  };
+
+  const deleteSession = async (id: string) => {
+    try {
+      await fetch(`/api/intake/session/${id}`, { method: 'DELETE' });
+      loadPastSessions();
+      if (sessionId === id) handleReset();
+    } catch { /* ignore */ }
+    setContextMenu(null);
+  };
+
+  const rerunSession = async (id: string) => {
+    setContextMenu(null);
+    try {
+      const res = await fetch(`/api/intake/session/${id}`);
+      const session = await res.json();
+      if (session.sourceText) {
+        setText(session.sourceText);
+        setSelectedProvider(session.provider || 'claude');
+        setSelectedModel(session.model || 'claude-sonnet-4-6');
+        setResult(null);
+        setError(null);
+        setApprovedItems(new Set());
+        setRejectedItems(new Set());
+        setApplyResult(null);
+        // Auto-submit
+        setProcessing(true);
+        const submitRes = await fetch('/api/intake', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: session.sourceText,
+            provider: session.provider || 'claude',
+            model: session.model || 'claude-sonnet-4-6',
+            systemInstructions: session.systemInstructions || undefined,
+          }),
+        });
+        const data = await submitRes.json();
+        if (data.sessionId) {
+          setSessionId(data.sessionId);
+        } else {
+          setError('Failed to start reprocessing');
+          setProcessing(false);
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rerun session');
+    }
+  };
+
+  // Close context menu on click outside
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = () => setContextMenu(null);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [contextMenu]);
 
   // ── Table columns ──
 
@@ -638,32 +736,57 @@ export function IntakePage() {
       accessorKey: 'timestamp',
       header: 'Date',
       cell: ({ row }) => (
-        <span style={{ fontSize: '12px', whiteSpace: 'nowrap' }}>
+        <span
+          style={{ fontSize: '12px', whiteSpace: 'nowrap', display: 'block' }}
+          onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: row.original }); }}
+        >
           {new Date(row.original.timestamp).toLocaleDateString()} {new Date(row.original.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </span>
       ),
     },
-    { accessorKey: 'provider', header: 'Provider', cell: ({ row }) => <span style={{ fontSize: '12px', textTransform: 'capitalize' }}>{row.original.provider}</span> },
-    { accessorKey: 'sourceExcerpt', header: 'Source', cell: ({ row }) => <span style={{ fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '300px', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.original.sourceExcerpt}</span> },
+    { accessorKey: 'provider', header: 'Provider', cell: ({ row }) => (
+      <span
+        style={{ fontSize: '12px', textTransform: 'capitalize', display: 'block' }}
+        onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: row.original }); }}
+      >{row.original.provider}</span>
+    ) },
+    { accessorKey: 'sourceExcerpt', header: 'Source', cell: ({ row }) => (
+      <button
+        onClick={() => showSourceForSession(row.original.id)}
+        onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: row.original }); }}
+        style={{ fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '300px', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0, textDecoration: 'underline', textDecorationColor: 'var(--border-default)', textUnderlineOffset: '3px' }}
+        title="Click to view full source text"
+      >{row.original.sourceExcerpt}</button>
+    ) },
     {
       accessorKey: 'status',
       header: 'Status',
       cell: ({ row }) => {
         const s = row.original as any;
-        if (s.appliedAt) return <Badge variant="selected">Applied</Badge>;
-        if (s.status === 'ready' && s.conflictCount > 0) return <span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--dtp-pink)', fontWeight: 700, padding: '3px 8px', borderRadius: '4px', background: 'color-mix(in srgb, var(--dtp-pink) 10%, transparent)' }}>Conflict</span>;
-        if (s.status === 'ready') return <Badge variant="default">Ready</Badge>;
-        if (s.status === 'error') return <Badge variant="info">Error</Badge>;
-        return <Badge variant="info">Processing</Badge>;
+        const wrap = (el: React.ReactNode) => (
+          <span onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: row.original }); }}>{el}</span>
+        );
+        if (s.appliedAt) return wrap(<Badge variant="selected">Applied</Badge>);
+        if (s.status === 'ready' && s.conflictCount > 0) return wrap(<span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--dtp-pink)', fontWeight: 700, padding: '3px 8px', borderRadius: '4px', background: 'color-mix(in srgb, var(--dtp-pink) 10%, transparent)' }}>Conflict</span>);
+        if (s.status === 'ready') return wrap(<Badge variant="default">Ready</Badge>);
+        if (s.status === 'error') return wrap(<span title={s.error || 'Unknown error'}><Badge variant="info">Error</Badge></span>);
+        return wrap(<Badge variant="info">Processing</Badge>);
       },
     },
     {
-      id: 'load',
+      id: 'open',
       header: '',
-      cell: ({ row }) => row.original.status === 'ready' || row.original.appliedAt ? (
+      size: 80,
+      cell: ({ row }) => row.original.status === 'ready' || row.original.appliedAt || row.original.status === 'error' ? (
         <button onClick={() => loadSession(row.original.id)} style={{
-          fontSize: '11px', color: 'var(--jf-lavender)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline',
-        }}>Load</button>
+          display: 'flex', alignItems: 'center', gap: '5px', padding: '5px 12px',
+          fontSize: '11px', fontWeight: 600, borderRadius: '6px', cursor: 'pointer',
+          background: 'rgba(201,207,233,0.08)', border: '1px solid rgba(201,207,233,0.2)',
+          color: 'var(--jf-lavender)', transition: 'all 0.15s',
+        }}>
+          <ExternalLink size={11} />
+          Open
+        </button>
       ) : null,
     },
   ], []);
@@ -795,8 +918,22 @@ export function IntakePage() {
       {result && (
         <div>
           {/* Summary */}
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--jf-lavender)', fontWeight: 600, marginBottom: '12px' }}>
-            Analysis
+          <div className="flex items-center justify-between" style={{ marginBottom: '12px' }}>
+            <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--jf-lavender)', fontWeight: 600 }}>
+              Analysis
+            </div>
+            <button
+              onClick={() => { setResult(null); setApprovedItems(new Set()); setRejectedItems(new Set()); setApplyResult(null); setContentEdits({}); setClarificationAnswers({}); setConflictResolutions({}); setStagedConflicts(new Set()); }}
+              title="Close results"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: '24px', height: '24px', borderRadius: '6px',
+                background: 'none', border: '1px solid var(--border-default)',
+                color: 'var(--text-secondary)', cursor: 'pointer', transition: 'all 0.15s',
+              }}
+            >
+              <X size={13} />
+            </button>
           </div>
           <div className="wiki-card" style={{ padding: '20px 24px', marginBottom: '16px' }}>
             <p style={{ fontSize: '14px', color: 'var(--text-primary)', lineHeight: 1.7 }}>{result.summary}</p>
@@ -821,25 +958,31 @@ export function IntakePage() {
                       <CheckCheck size={14} />
                       Approve All
                     </button>
-                    <button onClick={handleReprocess} disabled={reprocessing} style={{
-                      display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
-                      fontSize: '12px', fontWeight: 600, background: 'rgba(201, 207, 233, 0.1)',
-                      border: '1px solid rgba(201, 207, 233, 0.25)', color: 'var(--jf-lavender)',
-                      cursor: reprocessing ? 'wait' : 'pointer',
-                    }}>
-                      {reprocessing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                      Reprocess
-                    </button>
-                    {approvedItems.size > 0 && !applyResult && (
-                      <button onClick={handleApply} disabled={applying} style={{
+                    {(approvedItems.size > 0 || hasRefineData) && !applyResult && (
+                      <button onClick={handleApplyAndRefine} disabled={applying || reprocessing} style={{
                         display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
                         fontSize: '12px', fontWeight: 600, background: 'rgba(216, 131, 10, 0.15)',
-                        border: '1px solid rgba(216, 131, 10, 0.3)', color: 'var(--jf-cream)', cursor: applying ? 'wait' : 'pointer',
+                        border: '1px solid rgba(216, 131, 10, 0.3)', color: 'var(--jf-cream)',
+                        cursor: applying || reprocessing ? 'wait' : 'pointer',
                       }}>
-                        {applying ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                        Apply {approvedItems.size} Change{approvedItems.size !== 1 ? 's' : ''}
+                        {applying || reprocessing ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                        {approvedItems.size > 0 && hasRefineData
+                          ? `Apply ${approvedItems.size} & Refine`
+                          : approvedItems.size > 0
+                            ? `Apply ${approvedItems.size} Change${approvedItems.size !== 1 ? 's' : ''}`
+                            : 'Refine Answers'}
                       </button>
                     )}
+                    {/* Workflow hint */}
+                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)', opacity: 0.6, fontStyle: 'italic' }}>
+                      {approvedItems.size > 0 && hasRefineData
+                        ? 'Will apply approved changes, then refine with your answers'
+                        : approvedItems.size > 0
+                          ? `${approvedItems.size} change${approvedItems.size !== 1 ? 's' : ''} ready to commit`
+                          : hasRefineData
+                            ? 'Will send your answers to refine suggestions'
+                            : 'Approve matches to apply, answer questions to refine'}
+                    </span>
                   </div>
                 }
                 getRowStyle={(row) => {
@@ -883,9 +1026,44 @@ export function IntakePage() {
                 Conflicts Detected
               </div>
               {result.conflicts.map((c, i) => (
-                <div key={i} className="wiki-card" style={{ padding: '16px 24px', marginBottom: '8px', borderLeft: '3px solid var(--dtp-pink)', display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                  <AlertTriangle size={16} style={{ color: 'var(--dtp-pink)', flexShrink: 0, marginTop: '2px' }} />
-                  <span style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{c}</span>
+                <div key={i} className="wiki-card" style={{ padding: '16px 24px', marginBottom: '8px', borderLeft: '3px solid var(--dtp-pink)' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '10px' }}>
+                    <AlertTriangle size={16} style={{ color: 'var(--dtp-pink)', flexShrink: 0, marginTop: '2px' }} />
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{c}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={conflictResolutions[i] || ''}
+                      onChange={e => setConflictResolutions(prev => ({ ...prev, [i]: e.target.value }))}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && conflictResolutions[i]?.trim()) {
+                          setStagedConflicts(prev => { const s = new Set(prev); s.add(i); return s; });
+                        }
+                      }}
+                      onBlur={() => {
+                        if (conflictResolutions[i]?.trim()) {
+                          setStagedConflicts(prev => { const s = new Set(prev); s.add(i); return s; });
+                        }
+                      }}
+                      placeholder="How should this conflict be resolved? (included in refine)"
+                      style={{
+                        flex: 1, padding: '8px 12px', fontSize: '12px',
+                        background: 'var(--bg-input)', border: '1px solid var(--border-default)',
+                        borderRadius: '6px', color: 'var(--text-primary)', outline: 'none',
+                      }}
+                      onFocus={e => (e.target.style.borderColor = 'rgba(232,67,147,0.4)')}
+                    />
+                    {stagedConflicts.has(i) && (
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '3px',
+                        fontSize: '10px', fontWeight: 600, color: '#50e3c2',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        <Check size={12} /> Staged
+                      </span>
+                    )}
+                  </div>
                 </div>
               ))}
             </>
@@ -922,6 +1100,102 @@ export function IntakePage() {
           }
         }}
       />
+
+      {/* Session context menu */}
+      {contextMenu && (
+        <div
+          style={{
+            position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 10003,
+            background: '#1a1a1a', border: '1px solid #333', borderRadius: '8px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)', overflow: 'hidden', minWidth: '160px',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => { loadSession(contextMenu.session.id); setContextMenu(null); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '10px', width: '100%',
+              padding: '10px 14px', fontSize: '12px', fontWeight: 500,
+              background: 'none', border: 'none', color: 'var(--text-primary)',
+              cursor: 'pointer', textAlign: 'left',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(201,207,233,0.08)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <ExternalLink size={13} style={{ color: 'var(--jf-lavender)' }} />
+            Open
+          </button>
+          <button
+            onClick={() => rerunSession(contextMenu.session.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '10px', width: '100%',
+              padding: '10px 14px', fontSize: '12px', fontWeight: 500,
+              background: 'none', border: 'none', color: 'var(--text-primary)',
+              cursor: 'pointer', textAlign: 'left',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(201,207,233,0.08)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <RotateCcw size={13} style={{ color: 'var(--tnb-orange)' }} />
+            Rerun
+          </button>
+          <div style={{ height: '1px', background: '#333', margin: '2px 0' }} />
+          <button
+            onClick={() => deleteSession(contextMenu.session.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '10px', width: '100%',
+              padding: '10px 14px', fontSize: '12px', fontWeight: 500,
+              background: 'none', border: 'none', color: 'var(--dtp-pink)',
+              cursor: 'pointer', textAlign: 'left',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(232,67,147,0.08)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <Trash2 size={13} />
+            Delete
+          </button>
+        </div>
+      )}
+
+      {/* Source text modal */}
+      {(sourceModalText !== null || sourceModalLoading) && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 10002,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }} onClick={() => setSourceModalText(null)} />
+          <div style={{
+            position: 'relative', width: '90%', maxWidth: '700px', maxHeight: '80vh',
+            background: '#1a1a1a', border: '1px solid #333', borderRadius: '12px',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.5)', overflow: 'hidden', display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '16px 20px', borderBottom: '1px solid #333',
+            }}>
+              <div className="flex items-center gap-2">
+                <FileText size={14} style={{ color: 'var(--jf-lavender)' }} />
+                <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--jf-cream)' }}>Source Text</span>
+              </div>
+              <button onClick={() => setSourceModalText(null)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '4px' }}>
+                <X size={18} />
+              </button>
+            </div>
+            <div style={{ padding: '20px', overflow: 'auto', flex: 1 }}>
+              {sourceModalLoading ? (
+                <div className="flex items-center gap-2" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+                  <Loader2 size={14} className="animate-spin" /> Loading...
+                </div>
+              ) : (
+                <pre style={{
+                  fontSize: '13px', fontFamily: 'var(--font-sans)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', lineHeight: 1.7, margin: 0,
+                }}>{sourceModalText}</pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
