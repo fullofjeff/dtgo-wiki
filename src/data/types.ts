@@ -21,3 +21,16 @@ export interface SearchResult {
   headingId?: string;
   snippet: string;
 }
+
+export interface PersonMention {
+  fileSlug: string;       // e.g. "forestias"
+  fileTitle: string;      // e.g. "The Forestias"
+  context: string;        // the paragraph containing the mention
+}
+
+export interface PersonRecord {
+  canonicalName: string;
+  aliases: string[];
+  bio?: string;           // markdown body from people.md ### section (if exists)
+  mentions: PersonMention[];
+}

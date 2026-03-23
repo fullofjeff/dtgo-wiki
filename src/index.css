@@ -151,6 +151,10 @@ body {
 .prose h3 { font-size: 1.1rem; font-weight: 600; margin-top: 1.25rem; margin-bottom: 0.4rem; color: var(--text-primary); }
 .prose p { margin-bottom: 0.6rem; color: var(--text-secondary); font-weight: 300; font-size: 14px; line-height: 1.7; }
 .prose strong { color: var(--text-primary); font-weight: 500; }
+.prose strong.person-link { cursor: pointer; }
+.prose strong.person-link:hover { color: var(--jf-gold); }
+.prose .intake-source-line { cursor: pointer; transition: color 0.15s; }
+.prose .intake-source-line:hover { color: var(--jf-gold) !important; }
 .prose hr { border: none; border-top: 1px solid var(--border-default); margin: 2.5rem 0; }
 .prose code { background: rgba(201,207,233,0.08); padding: 3px 8px; border-radius: 4px; font-size: 0.82em; font-family: var(--font-mono); color: var(--jf-lavender); }
 .prose a { color: var(--jf-lavender); text-decoration: none; }
@@ -190,17 +194,23 @@ body {
   min-height: 80px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-left: 3px solid;
   border-radius: 10px;
   padding: 12px 14px;
   box-shadow: var(--card-shadow);
   font-family: var(--font-sans);
   transition: box-shadow 0.2s, filter 0.2s;
+  position: relative;
+  overflow: visible;
 }
 
 .org-node:hover {
   filter: brightness(1.15);
   box-shadow: var(--card-shadow-hover);
+}
+
+.react-flow__node.selected .org-node {
+  border-color: var(--jf-gold);
+  box-shadow: 0 0 0 2px rgba(216, 131, 10, 0.3), var(--card-shadow);
 }
 
 .org-node__name {
@@ -244,9 +254,7 @@ body {
   border: none;
 }
 
-.react-flow__background {
-  background: var(--bg-surface-inset) !important;
-}
+
 
 .org-controls .react-flow__controls-button {
   background: var(--bg-surface);
@@ -264,3 +272,98 @@ body {
   border: 1px solid var(--border-default) !important;
   border-radius: 8px !important;
 }
+
+/* ── react-chrono dark theme overrides ── */
+
+/* Global dark reset — override all white backgrounds from react-chrono's stylesheet */
+.chrono-container,
+.chrono-container div,
+.chrono-container section,
+.chrono-container article {
+  background-color: transparent !important;
+  color: var(--text-primary) !important;
+}
+
+/* Card container */
+.chrono-container [class*="TimelineCard"] {
+  background: #1a1a1a !important;
+  color: var(--text-primary) !important;
+  border-radius: var(--radius-card) !important;
+  border: 1px solid rgba(255,255,255,0.06) !important;
+  box-shadow: var(--card-shadow) !important;
+  overflow: hidden !important;
+  transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+
+.chrono-container [class*="TimelineCard"]:hover {
+  border-color: rgba(216, 131, 10, 0.4) !important;
+  box-shadow: 0 0 0 1px rgba(216, 131, 10, 0.15), var(--card-shadow) !important;
+}
+
+/* Card title */
+.chrono-container [class*="CardTitle"],
+.chrono-container [class*="card-title"],
+.chrono-container h3 {
+  color: var(--jf-cream) !important;
+  font-family: var(--font-serif) !important;
+  font-weight: 600 !important;
+}
+
+/* Card subtitle */
+.chrono-container [class*="CardSubTitle"],
+.chrono-container [class*="card-sub-title"] {
+  color: var(--text-secondary) !important;
+}
+
+/* Card body / details text */
+.chrono-container [class*="CardDescription"],
+.chrono-container [class*="card-description"],
+.chrono-container p {
+  color: var(--text-secondary) !important;
+  font-weight: 300 !important;
+  font-size: 13px !important;
+  line-height: 1.6 !important;
+}
+
+/* Timeline point / circle */
+.chrono-container [class*="TimelinePoint"],
+.chrono-container [class*="timeline-circle"],
+.chrono-container [class*="Point"] {
+  background: var(--jf-gold) !important;
+  border-color: var(--jf-gold) !important;
+}
+
+/* Year labels on the timeline axis */
+.chrono-container [class*="TimelineTitle"],
+.chrono-container [class*="timeline-item-title"],
+.chrono-container [class*="Title"] {
+  color: var(--jf-cream) !important;
+  font-family: var(--font-serif) !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+}
+
+/* Active year label */
+.chrono-container [class*="active"] [class*="TimelineTitle"],
+.chrono-container .active [class*="timeline-item-title"] {
+  color: var(--jf-gold) !important;
+}
+
+/* Timeline track / vertical line */
+.chrono-container [class*="Track"],
+.chrono-container [class*="timeline-vertical-circle"]::before,
+.chrono-container [class*="timeline-vertical-circle"]::after {
+  background: rgba(216, 131, 10, 0.25) !important;
+}
+
+/* Hide toolbar, read-more, show-more */
+.chrono-container [class*="ShowMore"],
+.chrono-container .show-more,
+.chrono-container [class*="Toolbar"] {
+  display: none !important;
+}
+
+/* Scrollbar styling */
+.chrono-container ::-webkit-scrollbar { width: 6px; }
+.chrono-container ::-webkit-scrollbar-track { background: transparent; }
+.chrono-container ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }

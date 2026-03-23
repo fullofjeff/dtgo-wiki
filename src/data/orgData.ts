@@ -10,7 +10,7 @@ export interface OrgEntity {
   keyMetrics?: { label: string; value: string }[];
 }
 
-export const orgEntities: OrgEntity[] = [
+export const initialOrgEntities: OrgEntity[] = [
   // ── Root ──
   {
     id: 'dtgo',

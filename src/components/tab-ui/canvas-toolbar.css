@@ -1,0 +1,142 @@
+/**
+ * CanvasToolbar Component Styles
+ * Extracted from inline styles for better maintainability
+ */
+
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  height: 62px;
+  box-sizing: border-box;
+  background-color: #141418;
+  border-top: 1px solid rgba(235, 231, 199, 0.08);
+  position: relative;
+  overflow: visible;
+  width: 100%;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.canvas-toolbar__separator {
+  width: 1px;
+  height: 20px;
+  background-color: rgba(235, 231, 199, 0.1);
+  margin: 0 12px;
+}
+
+.canvas-toolbar__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.canvas-toolbar__input-section {
+  display: flex;
+  align-items: center;
+  flex: 1 1 400px;
+  max-width: 400px;
+  min-width: 200px;
+  height: 100%;
+  overflow: visible;
+  position: relative;
+}
+
+.canvas-toolbar__expanding-wrapper {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 8px;
+  z-index: 1001;
+  width: 100%;
+  position: absolute;
+  bottom: 12px;
+  left: 0;
+}
+
+.canvas-toolbar__input-wrapper {
+  background-color: rgba(20, 20, 24, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(235, 231, 199, 0.08);
+  border-radius: 6px;
+  padding: 0;
+  box-shadow: none;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  align-items: center;
+  overflow: hidden;
+  min-height: 38px; /* Match broadcast button height */
+}
+
+.canvas-toolbar__input-wrapper--focused {
+  border-color: rgba(216, 131, 10, 0.4);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.canvas-toolbar__input-wrapper--error {
+  border-color: rgba(239, 68, 68, 0.6);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.3);
+  animation: input-error 0.6s ease-out;
+}
+
+.canvas-toolbar__textarea {
+  flex: 1;
+  background-color: transparent;
+  border: none;
+  color: #ebe7c7;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  outline: none;
+  resize: none;
+  min-height: 20px;
+  max-height: 120px;
+  padding: 8px 12px 8px 16px;
+}
+
+.canvas-toolbar__broadcast-btn {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background-color: rgba(235, 231, 199, 0.05);
+  border: 1px solid rgba(235, 231, 199, 0.1);
+  color: rgba(235, 231, 199, 0.6);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 0;
+}
+
+.canvas-toolbar__broadcast-btn:hover {
+  background-color: rgba(235, 231, 199, 0.1);
+}
+
+.canvas-toolbar__broadcast-btn--active {
+  background-color: rgba(216, 131, 10, 0.2);
+  border-color: rgba(216, 131, 10, 0.4);
+  color: #d8830a;
+}
+
+.canvas-toolbar__broadcast-btn--active:hover {
+  background-color: rgba(216, 131, 10, 0.25);
+}
+
+.canvas-toolbar__right-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Error animation keyframes */
+@keyframes input-error {
+  0%, 100% { transform: translateX(0); }
+  10%, 30%, 50%, 70%, 90% { transform: translateX(-2px); }
+  20%, 40%, 60%, 80% { transform: translateX(2px); }
+}

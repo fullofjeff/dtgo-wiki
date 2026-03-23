@@ -84,6 +84,13 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         onClick={() => navigate('/org-chart')}
       />
       <SidebarMenuItem
+        icon={Clock}
+        label="Timeline"
+        isActive={location.pathname === '/timeline'}
+        collapsed={collapsed}
+        onClick={() => navigate('/timeline')}
+      />
+      <SidebarMenuItem
         icon={Inbox}
         label="Intake"
         isActive={location.pathname === '/intake'}
@@ -107,7 +114,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
 
       {/* Menu items */}
       <div className="flex-1 overflow-y-auto">
-        {files.map(file => {
+        {files.filter(f => f.slug !== 'history').map(file => {
           const Icon = iconMap[file.slug] || FileText;
           const isActive = location.pathname === `/file/${file.slug}`;
 

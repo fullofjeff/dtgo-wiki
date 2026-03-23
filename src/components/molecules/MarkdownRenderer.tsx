@@ -1,8 +1,12 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Components } from 'react-markdown';
 import { SectionModal } from './SectionModal';
+import { PersonModal } from './PersonModal';
+import { SourceModal } from './SourceModal';
+import { getPersonNames, getPersonRecord } from '@/data/personIndex';
+import type { PersonRecord } from '@/data/types';
 
 function slugify(text: string): string {
   return text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').trim();
@@ -42,14 +46,25 @@ function extractSection(md: string, heading: string, level: number): string {
   return out.join('\n').trim();
 }
 
+
 export function MarkdownRenderer({ content }: { content: string }) {
-  const [modal, setModal] = useState<{ title: string; body: string } | null>(null);
+  const [sectionModal, setSectionModal] = useState<{ title: string; body: string } | null>(null);
+  const [personModal, setPersonModal] = useState<PersonRecord | null>(null);
+  const [sourceModalPrefix, setSourceModalPrefix] = useState<string | null>(null);
+  const personNameSet = useMemo(() => new Set(getPersonNames()), []);
 
   function handleClick(children: unknown, level: number) {
     const text = textContent(children);
     const body = extractSection(content, text, level);
     if (body) {
-      setModal({ title: text, body });
+      setSectionModal({ title: text, body });
+    }
+  }
+
+  function handlePersonClick(name: string) {
+    const record = getPersonRecord(name);
+    if (record) {
+      setPersonModal(record);
     }
   }
 
@@ -75,19 +90,83 @@ export function MarkdownRenderer({ content }: { content: string }) {
         {children}
       </h3>
     ),
+
+    strong: ({ children }) => {
+      const text = textContent(children);
+      if (personNameSet.has(text)) {
+        return (
+          <strong
+            onClick={(e) => {
+              e.stopPropagation();
+              handlePersonClick(text);
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handlePersonClick(text); }}
+            className="person-link"
+            role="button"
+            tabIndex={0}
+          >
+            {children}
+          </strong>
+        );
+      }
+      return <strong>{children}</strong>;
+    },
+
+    // Hide [intake:xxx] link text but make parent Sources line clickable via p override
+    a: ({ href, children }) => {
+      if (href?.startsWith('intake-source:')) {
+        return null; // Hidden — the p component handles the click
+      }
+      return <a href={href}>{children}</a>;
+    },
+
+    // Make Sources paragraphs with intake tags clickable on hover
+    p: ({ children }) => {
+      const text = textContent(children);
+      const intakeMatch = text.match(/\[intake:([a-f0-9]+)\]/);
+      if (intakeMatch) {
+        const prefix = intakeMatch[1];
+        return (
+          <p
+            role="button"
+            tabIndex={0}
+            onClick={() => setSourceModalPrefix(prefix)}
+            onKeyDown={(e) => { if (e.key === 'Enter') setSourceModalPrefix(prefix); }}
+            style={{ cursor: 'pointer', transition: 'color 0.15s' }}
+            className="intake-source-line"
+            title="Click to view original source"
+          >
+            {children}
+          </p>
+        );
+      }
+      return <p>{children}</p>;
+    },
   };
 
   return (
     <>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {content}
+        {content.replace(/\[intake:([a-f0-9]+)\]/g, '[](intake-source:$1)')}
       </ReactMarkdown>
 
       <SectionModal
-        open={modal !== null}
-        onClose={() => setModal(null)}
-        title={modal?.title ?? ''}
-        content={modal?.body ?? ''}
+        open={sectionModal !== null}
+        onClose={() => setSectionModal(null)}
+        title={sectionModal?.title ?? ''}
+        content={sectionModal?.body ?? ''}
+      />
+
+      <PersonModal
+        open={personModal !== null}
+        onClose={() => setPersonModal(null)}
+        person={personModal}
+      />
+
+      <SourceModal
+        open={sourceModalPrefix !== null}
+        onClose={() => setSourceModalPrefix(null)}
+        sessionIdPrefix={sourceModalPrefix ?? ''}
       />
     </>
   );

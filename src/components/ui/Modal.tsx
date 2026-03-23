@@ -25,7 +25,7 @@ function ModalRoot({ open, onClose, children }: ModalRootProps) {
   return (
     <ModalContext.Provider value={{ onClose }}>
       <Transition show={open} as={Fragment}>
-        <Dialog onClose={onClose} className="relative z-50">
+        <Dialog onClose={onClose} className="relative z-[10000]">
           {children}
         </Dialog>
       </Transition>

@@ -73,7 +73,7 @@ export function SearchBar() {
       </div>
 
       {open && results.length > 0 && (
-        <div className="search-dropdown absolute top-full left-0 right-0 mt-2 z-[100]">
+        <div className="search-dropdown absolute bottom-full left-0 right-0 mb-2 z-[100]">
           {results.map((r, i) => (
             <div
               key={`${r.file}-${r.headingId}-${i}`}

@@ -1,7 +1,7 @@
 import type { KBFile, Heading } from './types';
 
-// Import all .md files from knowledge-base as raw strings
-const mdModules = import.meta.glob('/knowledge-base/*.md', {
+// Import all .md files from knowledge-base (including subdirectories like people/)
+const mdModules = import.meta.glob('/knowledge-base/**/*.md', {
   query: '?raw',
   import: 'default',
   eager: true,
@@ -58,10 +58,15 @@ function loadFiles(): KBFile[] {
 
   for (const [path, raw] of Object.entries(mdModules)) {
     // path: /knowledge-base/mqdc.md -> slug: mqdc
+    // path: /knowledge-base/people/founders.md -> slug: people/founders
     const filename = path.split('/').pop()!;
-    if (filename === 'CONTRIBUTING.md' || filename === 'INTAKE.md') continue;
+    if (filename === 'CONTRIBUTING.md' || filename === 'INTAKE.md' ||
+        filename === '_registry.md' || filename === '_aliases.md') continue;
 
-    const slug = filename.replace(/\.md$/, '').replace(/^_/, '');
+    const slug = path
+      .replace(/^\/knowledge-base\//, '')
+      .replace(/\.md$/, '')
+      .replace(/(^|\/)_/g, '$1');
     const { meta, body } = parseFrontmatter(raw);
     const headings = extractHeadings(body);
 
