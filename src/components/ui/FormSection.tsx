@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Pencil } from 'lucide-react';
 
 interface FormSectionProps {
     title: string;
@@ -7,9 +8,10 @@ interface FormSectionProps {
     children: ReactNode;
     className?: string;
     defaultOpen?: boolean;
+    onEdit?: () => void;
 }
 
-export function FormSection({ title, description, children, className = '', defaultOpen = false }: FormSectionProps) {
+export function FormSection({ title, description, children, className = '', defaultOpen = false, onEdit }: FormSectionProps) {
     const [isOpen, setIsOpen] = useState(defaultOpen);
 
     return (
@@ -28,10 +30,21 @@ export function FormSection({ title, description, children, className = '', defa
                         </p>
                     )}
                 </div>
-                <div className={`transform transition-transform duration-300 ${isOpen ? 'rotate-180' : ''} p-1 rounded-full group-hover:bg-[rgba(201,207,233,0.1)]`}>
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M6 9L12 15L18 9" stroke="currentColor" className="text-[var(--text-secondary)] group-hover:text-[var(--jf-lavender)] transition-colors" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
+                <div className="flex items-center gap-1">
+                    {onEdit && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onEdit(); }}
+                            className="p-1.5 rounded-full opacity-0 group-hover:opacity-100 hover:bg-[rgba(201,207,233,0.15)] transition-all"
+                            title="Edit section"
+                        >
+                            <Pencil size={14} className="text-[var(--text-secondary)] hover:text-[var(--jf-lavender)]" />
+                        </button>
+                    )}
+                    <div className={`transform transition-transform duration-300 ${isOpen ? 'rotate-180' : ''} p-1 rounded-full group-hover:bg-[rgba(201,207,233,0.1)]`}>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M6 9L12 15L18 9" stroke="currentColor" className="text-[var(--text-secondary)] group-hover:text-[var(--jf-lavender)] transition-colors" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                    </div>
                 </div>
             </div>
             <AnimatePresence initial={false}>

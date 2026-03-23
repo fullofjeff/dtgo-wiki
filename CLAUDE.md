@@ -16,11 +16,13 @@ React 19 + Vite 6 + TypeScript + Tailwind CSS 4 knowledge base for DTGO Corporat
 - `/intake` — IntakePage (AI content processor)
 
 **Component layers** (`src/components/`):
-- `layout/` — Shell, Sidebar, SidebarContext, SearchBar
-- `pages/` — HomePage, FilePage, SearchPage, OrgChartPage, IntakePage
-- `molecules/` — MarkdownRenderer, TableOfContents, SectionModal
-- `ui/` — Modal, PinClosedButton, SidebarMenuItem
-- `org-chart/` — OrgNode, layoutUtils
+- `layout/` — Shell, Sidebar, SidebarContext, SearchBar, RequireAuth
+- `pages/` — HomePage, FilePage, SearchPage, OrgChartPage, IntakePage, TimelinePage, LoginPage
+- `molecules/` — MarkdownRenderer, TableOfContents, SectionModal, EntityModal, PersonModal, SourceModal
+- `ui/` — Modal, Badge, Chip, DataTable, Dropdown, FormSection, InlineEdit, Toggle, SidebarMenuItem, PinClosedButton
+- `tab-ui/` — ChromeTabs, ChromeTab, AgendaHeader, TabContextMenu, ToolbarButton, UnifiedOutline
+- `org-chart/` — OrgNode, EditableEdge, layoutUtils
+- `model/` — ModelChip, ProviderSwitcher, ModelVariantList, MemoryToggle
 
 ## Knowledge Base
 
@@ -47,9 +49,13 @@ All tokens in `src/index.css` — shared with JF_DASHBOARD/react-canvas:
 - Framer Motion for animations
 - Path alias: `@/*` → `./src/*`
 
-## Component Library
+## UI Design System Skill
 
-This project has a **component-library skill** (`.claude/skills/component-library/`) with a 60+ component reference copied from JF_DASHBOARD. Before creating any new UI component, check the skill's quick-ref and this project's own component inventory.
+This project has a **ui-design-system skill** (`.claude/skills/component-library/`) covering component reuse, design tokens, compound component patterns, and cross-project adaptation from JF_DASHBOARD (60+ components). Before creating any UI component, styling, or layout work, the skill auto-triggers and provides:
+- Component inventories (local + JF_DASHBOARD)
+- Design token reference with typography scale and CSS utility classes
+- Pattern documentation (compound components, context, portals, motion)
+- Cross-project adaptation checklist with token remapping
 
 ## Dev Commands
 

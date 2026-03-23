@@ -636,6 +636,12 @@ Return ONLY valid JSON:
         // Rebuild master index
         masterIndex = buildMasterIndex();
 
+        // Auto-ingest: update vector store in background
+        exec('npm run ingest', { cwd: __dirname }, (err) => {
+          if (err) console.warn('[intake] Auto-ingest failed:', err.message);
+          else console.log('[intake] Auto-ingest complete — vector store updated');
+        });
+
         const applied = validationResults.filter(v => v.applied).length;
         const skipped = validationResults.filter(v => !v.applied).length;
         res.setHeader('Content-Type', 'application/json');
@@ -727,6 +733,149 @@ Return ONLY valid JSON, no markdown fences.`;
         } catch (outerErr: unknown) {
           console.error('[intake/reprocess] Unhandled error:', outerErr);
           if (!res.headersSent) { res.statusCode = 500; res.end(`Reprocess error: ${outerErr instanceof Error ? outerErr.message : 'Unknown'}`); }
+        }
+      });
+
+      // POST /api/kb/reprocess-section — AI-assisted section correction
+      server.middlewares.use('/api/kb/reprocess-section', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+        try {
+          const body = await readBody(req);
+          const { fileSlug, sectionHeading, correctionNote } = body;
+
+          if (!fileSlug || !sectionHeading || !correctionNote) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'fileSlug, sectionHeading, and correctionNote are required' }));
+            return;
+          }
+
+          // Read current section content
+          const filePath = path.join(KB_DIR, `${fileSlug}.md`);
+          if (!fs.existsSync(filePath)) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `File not found: ${fileSlug}.md` }));
+            return;
+          }
+
+          const raw = fs.readFileSync(filePath, 'utf-8');
+          const level = sectionHeading.startsWith('###') ? 3 : 2;
+          const cleanHeading = sectionHeading.replace(/^#+\s*/, '');
+          const sectionContent = extractSectionBody(raw, cleanHeading, level);
+
+          if (!sectionContent) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `Section "${cleanHeading}" not found in ${fileSlug}.md` }));
+            return;
+          }
+
+          // Gather RAG context
+          const query = `${cleanHeading} ${correctionNote}`;
+          const chunks = await findRelevantChunks(query, 8);
+          const ragContext = formatChunksAsContext(chunks);
+
+          // Build prompt and call Claude
+          const systemPrompt = `You are a knowledge base editor. The user has flagged an inaccuracy in a section.
+Rewrite the section incorporating their correction, using related context from
+the knowledge base to ensure accuracy. Preserve the existing formatting schema.
+Return ONLY the corrected section markdown (no JSON wrapping).
+
+EXISTING SECTION:
+${sectionContent}
+
+USER'S CORRECTION:
+${correctionNote}
+
+RELATED KB CONTEXT (from RAG):
+${ragContext}
+
+FORMATTING: Match the existing style exactly. Person entries use ### Name — Role, Organization format.`;
+
+          const key = apiKeys.claude;
+          if (!key) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Claude API key not configured' }));
+            return;
+          }
+
+          const { url, init } = providerConfigs.claude.buildRequest(
+            key, 'claude-sonnet-4-6', systemPrompt, `Please rewrite this section with the correction applied.`
+          );
+          const apiRes = await fetch(url, init);
+          if (!apiRes.ok) {
+            const errText = await apiRes.text();
+            res.statusCode = 502;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `Claude API error: ${errText}` }));
+            return;
+          }
+
+          const data = await apiRes.json();
+          const redrafted = providerConfigs.claude.extractText(data);
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ original: sectionContent, redrafted, fileSlug, sectionHeading: cleanHeading }));
+        } catch (err: unknown) {
+          console.error('[kb/reprocess-section] Error:', err);
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }));
+          }
+        }
+      });
+
+      // POST /api/kb/apply-section — apply an approved section rewrite
+      server.middlewares.use('/api/kb/apply-section', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+        try {
+          const body = await readBody(req);
+          const { fileSlug, sectionHeading, newContent } = body;
+
+          if (!fileSlug || !sectionHeading || !newContent) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'fileSlug, sectionHeading, and newContent are required' }));
+            return;
+          }
+
+          const filePath = path.join(KB_DIR, `${fileSlug}.md`);
+          if (!fs.existsSync(filePath)) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `File not found: ${fileSlug}.md` }));
+            return;
+          }
+
+          // Apply the section update
+          applyMatchToFile(filePath, sectionHeading, 'update', newContent);
+
+          // Git commit
+          try {
+            await gitCommit([filePath], `edit: corrected ${sectionHeading} in ${fileSlug}`);
+          } catch { /* git commit failure is non-fatal */ }
+
+          // Rebuild master index
+          masterIndex = buildMasterIndex();
+
+          // Auto-ingest: update vector store in background
+          exec('npm run ingest', { cwd: __dirname }, (err) => {
+            if (err) console.warn('[intake] Auto-ingest failed:', err.message);
+            else console.log('[intake] Auto-ingest complete — vector store updated');
+          });
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true, fileSlug, sectionHeading }));
+        } catch (err: unknown) {
+          console.error('[kb/apply-section] Error:', err);
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }));
+          }
         }
       });
 
@@ -852,6 +1001,24 @@ Every **Sources:** line you generate MUST end with [intake:${sessionId.slice(0, 
 
 CLARIFICATION REQUESTS:
 If the source text is ambiguous, unclear, or you're unsure where to place something, add a "clarifications" array to your response. Each item should describe what's unclear and what options exist. The user will review these before applying.
+
+PERSONAL NOTES DETECTION:
+The source text may contain personal observations, opinions, musings,
+strategic analysis, recommendations, or questions from the user intermixed
+with factual information. Identify these and route them separately:
+
+- Factual information → matches targeting existing KB files (as normal)
+- Personal notes/musings → matches targeting file "analysis" with action "append"
+  and appropriate ## section headings. Prefix content with
+  \`> **[Personal Note]**\` blockquote so it's visually distinct.
+  Use narrative prose, not bullet lists.
+
+Signs of personal notes: first-person language ("I think", "my impression",
+"we should consider"), opinions, strategic suggestions, questions, speculation,
+editorial commentary.
+
+A single source text may produce BOTH factual matches and note matches.
+Notes still get the [intake:sessionId] source tag for traceability.
 
 Return a JSON object:
 {

@@ -4,6 +4,7 @@ import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Che
 import { ModelChip } from '@/components/model/ModelChip';
 import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
+import { Modal } from '@/components/ui/Modal';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ModelVariantsConfig } from '@/types/models';
 
@@ -239,6 +240,7 @@ export function IntakePage() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; session: IntakeSession } | null>(null);
   const [conflictResolutions, setConflictResolutions] = useState<Record<number, string>>({});
   const [stagedConflicts, setStagedConflicts] = useState<Set<number>>(new Set());
+  const [successModal, setSuccessModal] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch providers and seed localStorage
@@ -269,9 +271,16 @@ export function IntakePage() {
 
   useEffect(() => { loadPastSessions(); }, [loadPastSessions]);
 
+  // Auto-dismiss success modal
+  useEffect(() => {
+    if (!successModal) return;
+    const t = setTimeout(() => setSuccessModal(false), 3000);
+    return () => clearTimeout(t);
+  }, [successModal]);
+
   // Polling for background processing
   useEffect(() => {
-    if (!sessionId || !processing) return;
+    if (!sessionId) return;
     pollRef.current = setInterval(async () => {
       try {
         const res = await fetch(`/api/intake/session/${sessionId}`);
@@ -290,7 +299,7 @@ export function IntakePage() {
       } catch { /* retry */ }
     }, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [sessionId, processing, loadPastSessions]);
+  }, [sessionId, loadPastSessions]);
 
   const handleProcess = async () => {
     if (!text.trim()) return;
@@ -315,6 +324,10 @@ export function IntakePage() {
       const data = await res.json();
       if (data.sessionId) {
         setSessionId(data.sessionId);
+        setSuccessModal(true);
+        setText('');
+        setSystemInstructions('');
+        setProcessing(false);
       } else {
         setError('Failed to start processing');
         setProcessing(false);
@@ -890,18 +903,44 @@ export function IntakePage() {
         </div>
       )}
 
-      {/* Processing indicator */}
-      {processing && (
-        <div className="wiki-card" style={{ padding: '20px 24px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <Loader2 size={18} className="animate-spin" style={{ color: 'var(--jf-gold)' }} />
-          <div>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>Processing in background...</div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-              You can continue working. Results will appear when ready.
+      {/* Success modal */}
+      <Modal.Root open={successModal} onClose={() => setSuccessModal(false)}>
+        <Modal.Overlay />
+        <Modal.Content size="sm">
+          <Modal.Body>
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}>
+                <Check size={40} style={{ color: 'var(--dtgo-green, #4ade80)' }} />
+              </div>
+              <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '8px' }}>
+                Submitted Successfully
+              </div>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                Processing in background. Results will appear in your session history.
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </Modal.Body>
+          <Modal.Footer>
+            <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
+              <button
+                onClick={() => setSuccessModal(false)}
+                style={{
+                  padding: '8px 32px',
+                  background: 'var(--jf-lavender)',
+                  color: '#000',
+                  border: 'none',
+                  borderRadius: 'var(--radius-input)',
+                  fontWeight: 600,
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                }}
+              >
+                Continue
+              </button>
+            </div>
+          </Modal.Footer>
+        </Modal.Content>
+      </Modal.Root>
 
       {/* Error */}
       {error && (

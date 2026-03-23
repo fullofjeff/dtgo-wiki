@@ -101,7 +101,7 @@ export function FilePage() {
         )}
 
         <div className="prose">
-          <MarkdownRenderer content={slug && highlightStats[slug] ? file.content.replace(/^#\s+.+\n*/m, '') : file.content} />
+          <MarkdownRenderer content={slug && highlightStats[slug] ? file.content.replace(/^#\s+.+\n*/m, '') : file.content} fileSlug={slug} />
         </div>
       </div>
 

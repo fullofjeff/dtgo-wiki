@@ -3,7 +3,7 @@ import { getAllFiles } from '@/data/loader';
 import { SidebarMenuItem } from '../ui/SidebarMenuItem';
 import {
   Building2, Users, FolderOpen, Clock, Handshake,
-  TreePine, Cloud, Briefcase, FileText, Network, Inbox
+  TreePine, Cloud, Briefcase, FileText, Network, Inbox, Lightbulb
 } from 'lucide-react';
 
 const businessUnitSlugs = new Set(['mqdc', 'tnb', 'dtp', 'forestias', 'cloud11', 'projects']);
@@ -19,6 +19,7 @@ const iconMap: Record<string, typeof Building2> = {
   'people/index': Users,
   history: Clock,
   partnerships: Handshake,
+  analysis: Lightbulb,
 };
 
 // Short labels for sidebar (full titles are too long)
@@ -33,6 +34,7 @@ const shortLabels: Record<string, string> = {
   'people/index': 'Key People',
   history: 'Timeline',
   partnerships: 'Partnerships',
+  analysis: 'My Analysis',
 };
 
 export function Sidebar({ collapsed }: { collapsed: boolean }) {

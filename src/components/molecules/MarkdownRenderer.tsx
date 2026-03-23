@@ -119,7 +119,7 @@ function splitIntoSegments(md: string): ContentSegment[] {
 }
 
 
-export function MarkdownRenderer({ content }: { content: string }) {
+export function MarkdownRenderer({ content, fileSlug }: { content: string; fileSlug?: string }) {
   const [sectionModal, setSectionModal] = useState<{ title: string; body: string } | null>(null);
   const [personModal, setPersonModal] = useState<PersonRecord | null>(null);
   const [entityModal, setEntityModal] = useState<EntityRecord | null>(null);
@@ -169,7 +169,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
       const level = heading.tagName === 'H2' ? 2 : 3;
       const text = heading.textContent || '';
       const body = extractSection(content, text, level);
-      if (body) setSectionModal({ title: text, body });
+      if (body && body.length > 0) setSectionModal({ title: text, body });
       return;
     }
   }, [content]);
@@ -244,7 +244,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
         {segments.map((seg, i) => {
           if (seg.type === 'formSection') {
             return (
-              <FormSection key={i} title={seg.title} description={seg.description}>
+              <FormSection key={i} title={seg.title} description={seg.description} onEdit={fileSlug ? () => setSectionModal({ title: seg.title, body: seg.body }) : undefined}>
                 <div className="prose">
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
                     {processedContent(seg.body)}
@@ -266,6 +266,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
         onClose={() => setSectionModal(null)}
         title={sectionModal?.title ?? ''}
         content={sectionModal?.body ?? ''}
+        fileSlug={fileSlug}
       />
 
       <PersonModal
