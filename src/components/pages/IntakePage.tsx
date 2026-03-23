@@ -160,6 +160,7 @@ function ClarificationCell({ idx, options, initial, onChange }: {
   };
 
   const handleNoteSubmit = () => {
+    onChange(idx, { selected, note });
     if (note.trim()) showConfirmation();
   };
 
@@ -188,7 +189,7 @@ function ClarificationCell({ idx, options, initial, onChange }: {
         <input
           type="text"
           value={note}
-          onChange={e => { setNote(e.target.value); onChange(idx, { selected, note: e.target.value }); }}
+          onChange={e => setNote(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') handleNoteSubmit(); }}
           onBlur={handleNoteSubmit}
           placeholder="Add context or notes..."
@@ -468,6 +469,12 @@ export function IntakePage() {
       const res = await fetch(`/api/intake/session/${id}`);
       const session = await res.json();
       setSessionId(session.id);
+      // Reset ephemeral state from previous session
+      setContentEdits({});
+      setConflictResolutions({});
+      setStagedConflicts(new Set());
+      setClarificationAnswers({});
+      setEditingIdx(null);
       if (session.result) {
         setResult(normalizeResult(session.result));
         setApprovedItems(new Set(Object.entries(session.approvals || {}).filter(([,v]) => v === 'approved').map(([k]) => Number(k))));
@@ -748,15 +755,17 @@ export function IntakePage() {
         return (
           <div className="flex items-center gap-1">
             {isEdited && <Badge variant="warning">Edited</Badge>}
-            <button onClick={() => handleApprove(idx)} title="Approve" style={{
+            <button onClick={() => handleApprove(idx)} disabled={isEdited} title={isEdited ? 'Refine first to apply edits' : 'Approve'} style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
               borderRadius: '6px', background: 'rgba(16, 163, 127, 0.1)', border: '1px solid rgba(16, 163, 127, 0.25)',
-              color: '#50e3c2', cursor: 'pointer', transition: 'all 0.15s',
+              color: '#50e3c2', cursor: isEdited ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
+              opacity: isEdited ? 0.3 : 1,
             }}><Check size={14} /></button>
-            <button onClick={() => handleReject(idx)} title="Reject" style={{
+            <button onClick={() => handleReject(idx)} disabled={isEdited} title={isEdited ? 'Refine first to apply edits' : 'Reject'} style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
               borderRadius: '6px', background: 'rgba(232, 67, 147, 0.1)', border: '1px solid rgba(232, 67, 147, 0.25)',
-              color: 'var(--dtp-pink)', cursor: 'pointer', transition: 'all 0.15s',
+              color: 'var(--dtp-pink)', cursor: isEdited ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
+              opacity: isEdited ? 0.3 : 1,
             }}><X size={14} /></button>
           </div>
         );
@@ -1019,7 +1028,7 @@ export function IntakePage() {
                       <CheckCheck size={14} />
                       Approve All
                     </button>
-                    {(approvedItems.size > 0 || hasRefineData) && !applyResult && (
+                    {(approvedItems.size > 0 || hasRefineData) && (
                       <button onClick={handleApplyAndRefine} disabled={applying || reprocessing} style={{
                         display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
                         fontSize: '12px', fontWeight: 600, background: 'rgba(216, 131, 10, 0.15)',

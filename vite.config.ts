@@ -724,8 +724,10 @@ Return ONLY valid JSON, no markdown fences.`;
             session.sourceText = `${session.sourceText}\n\n--- User Clarifications (${new Date().toISOString()}) ---\n${answerText}`;
           }
 
-          // Update session with refined result
+          // Update session with refined result — clear stale approvals since matches changed
           session.result = parsed;
+          session.approvals = {};
+          delete session.appliedAt;
           writeArchive(sessions);
 
           res.setHeader('Content-Type', 'application/json');
