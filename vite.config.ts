@@ -5,6 +5,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { exec } from 'node:child_process'
+import { findRelevantChunks, formatChunksAsContext } from './scripts/rag-retriever.js'
 
 // Provider configuration for multi-model intake
 interface ModelVariant {
@@ -721,13 +722,42 @@ Return ONLY valid JSON, no markdown fences.`;
             let aliasesContent = '';
             try { aliasesContent = fs.readFileSync(path.resolve(KB_DIR, '_aliases.md'), 'utf-8'); } catch { aliasesContent = ''; }
 
+            let registryContent = '';
+            try { registryContent = fs.readFileSync(path.resolve(KB_DIR, '_registry.md'), 'utf-8'); } catch { registryContent = ''; }
+
+            // RAG: retrieve relevant KB chunks via vector search (if available)
+            let ragContext = '';
+            let usingRag = false;
+            const geminiKey = apiKeys.gemini;
+            if (geminiKey) {
+              try {
+                const chunks = await findRelevantChunks(text, geminiKey, 12);
+                if (chunks && chunks.length > 0) {
+                  ragContext = formatChunksAsContext(chunks);
+                  usingRag = true;
+                  console.log(`[intake] RAG: retrieved ${chunks.length} relevant chunks`);
+                }
+              } catch (ragErr) {
+                console.warn('[intake] RAG retrieval failed, falling back to master index:', (ragErr as Error).message);
+              }
+            }
+
+            // Build KB context: prefer RAG chunks + registry, fall back to full master index
+            const kbContextSection = usingRag
+              ? `RELEVANT KNOWLEDGE BASE SECTIONS (retrieved by semantic similarity):
+${ragContext}
+
+FULL ENTITY REGISTRY — use to identify target files and sections for matches:
+${registryContent}`
+              : `MASTER INDEX — files, sections, and known entities in the knowledge base:
+${JSON.stringify(masterIndex, null, 2)}`;
+
             const systemPrompt = `You are a knowledge base intake processor. Analyze incoming text and determine how it merges into an existing knowledge base.
 
 INTAKE RULES:
 ${intakeRules}
 
-MASTER INDEX — files, sections, and known entities in the knowledge base:
-${JSON.stringify(masterIndex, null, 2)}
+${kbContextSection}
 
 ALIASES TABLE — resolve informal names, abbreviations, and shorthand:
 ${aliasesContent}
@@ -839,21 +869,27 @@ Rules:
   };
 }
 
-export default defineConfig({
-  plugins: [react(), tailwindcss(), intakeApiPlugin()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src'),
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, '/Users/jeffreyfullerton/PHYLA_BACKEND', '');
+  return {
+    plugins: [react(), tailwindcss(), intakeApiPlugin()],
+    define: {
+      __FIREBASE_API_KEY__: JSON.stringify(env.CUSTOM_FIREBASE_BACKEND_API_KEY || ''),
     },
-  },
-  assetsInclude: ['**/*.md'],
-  build: {
-    rollupOptions: {
-      output: {
-        entryFileNames: 'assets/dtgo-wiki.js',
-        chunkFileNames: 'assets/[name].js',
-        assetFileNames: 'assets/dtgo-wiki.[ext]',
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, 'src'),
       },
     },
-  },
+    assetsInclude: ['**/*.md'],
+    build: {
+      rollupOptions: {
+        output: {
+          entryFileNames: 'assets/dtgo-wiki.js',
+          chunkFileNames: 'assets/[name].js',
+          assetFileNames: 'assets/dtgo-wiki.[ext]',
+        },
+      },
+    },
+  };
 })

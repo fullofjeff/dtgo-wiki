@@ -8,8 +8,10 @@ import {
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 
+declare const __FIREBASE_API_KEY__: string;
+
 const firebaseConfig = {
-  apiKey: 'AIzaSyApmNAbYNpZykFNEYnSqKIyaFpcZonUxvs',
+  apiKey: __FIREBASE_API_KEY__,
   authDomain: 'phyla-digital-platform.firebaseapp.com',
   projectId: 'phyla-digital-platform',
   storageBucket: 'phyla-digital-platform.firebasestorage.app',
