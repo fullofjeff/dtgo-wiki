@@ -8,6 +8,10 @@ import { SearchPage } from './components/pages/SearchPage';
 import { OrgChartPage } from './components/pages/OrgChartPage';
 import { IntakePage } from './components/pages/IntakePage';
 import { TimelinePage } from './components/pages/TimelinePage';
+import { AttachmentsPage } from './components/pages/AttachmentsPage';
+import { ApprovalsPage } from './components/pages/ApprovalsPage';
+import { DirectoryPage } from './components/pages/DirectoryPage';
+import { ProjectsPage } from './components/pages/ProjectsPage';
 
 export default function App() {
   return (
@@ -20,6 +24,10 @@ export default function App() {
         <Route path="org-chart" element={<OrgChartPage />} />
         <Route path="timeline" element={<TimelinePage />} />
         <Route path="intake" element={<IntakePage />} />
+        <Route path="attachments" element={<AttachmentsPage />} />
+        <Route path="approvals" element={<ApprovalsPage />} />
+        <Route path="directory" element={<DirectoryPage />} />
+        <Route path="projects" element={<ProjectsPage />} />
       </Route>
     </Routes>
   );

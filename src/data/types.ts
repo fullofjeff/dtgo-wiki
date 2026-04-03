@@ -32,6 +32,9 @@ export interface PersonRecord {
   canonicalName: string;
   aliases: string[];
   bio?: string;           // markdown body from people.md ### section (if exists)
+  bioFileSlug?: string;   // e.g. "people/founders" — which file the bio lives in
+  bioHeading?: string;    // e.g. 'Thippaporn Ahriyavraromp ("Khun Bee")' — the ### heading
+  email?: string;         // contact email if present
   mentions: PersonMention[];
 }
 

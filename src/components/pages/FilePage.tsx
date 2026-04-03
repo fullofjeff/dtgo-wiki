@@ -1,9 +1,11 @@
 import { useParams, useLocation, Link } from 'react-router-dom';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { getFile } from '@/data/loader';
 import { MarkdownRenderer } from '../molecules/MarkdownRenderer';
 import { TableOfContents } from '../molecules/TableOfContents';
-import { FileText, ChevronRight, Home } from 'lucide-react';
+import { AttachmentPanel } from '../molecules/AttachmentPanel';
+import { NewPersonModal } from '../molecules/NewPersonModal';
+import { FileText, ChevronRight, Home, UserPlus } from 'lucide-react';
 
 const highlightStats: Record<string, Array<{ label: string; value: string }>> = {
   mqdc: [
@@ -44,6 +46,8 @@ export function FilePage() {
   const slug = params['*'] || '';
   const location = useLocation();
   const file = slug ? getFile(slug) : undefined;
+  const [showNewPerson, setShowNewPerson] = useState(false);
+  const isPeoplePage = slug.startsWith('people');
 
   useEffect(() => {
     if (location.hash) {
@@ -100,9 +104,30 @@ export function FilePage() {
           </div>
         )}
 
+        {isPeoplePage && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '12px' }}>
+            <button
+              onClick={() => setShowNewPerson(true)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                padding: '8px 16px', borderRadius: 'var(--radius-input)',
+                background: 'rgba(201,207,233,0.08)', border: '1px solid rgba(201,207,233,0.15)',
+                color: 'var(--jf-lavender)', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                transition: 'all 0.15s',
+              }}
+            >
+              <UserPlus size={14} /> Add Person
+            </button>
+          </div>
+        )}
+
         <div className="prose">
           <MarkdownRenderer content={slug && highlightStats[slug] ? file.content.replace(/^#\s+.+\n*/m, '') : file.content} fileSlug={slug} />
         </div>
+
+        <AttachmentPanel division={slug} />
+
+        <NewPersonModal open={showNewPerson} onClose={() => setShowNewPerson(false)} />
       </div>
 
       {/* TOC */}

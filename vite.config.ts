@@ -6,6 +6,17 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { exec } from 'node:child_process'
 import { findRelevantChunks, formatChunksAsContext } from './scripts/rag-retriever.js'
+import {
+  readMultipartBody,
+  processUploadedFiles,
+  uploadToStorage,
+  saveAttachmentMetadata,
+  listAttachments,
+  listAllAttachments,
+  getSignedUrl,
+  type AttachmentDoc,
+  type ParsedFile,
+} from './server/intake-handler.js'
 
 // Provider configuration for multi-model intake
 interface ModelVariant {
@@ -144,6 +155,13 @@ interface IntakeSession {
   error?: string;
   approvals: Record<string, 'approved' | 'rejected'>;
   appliedAt?: string;
+  attachments?: Array<{
+    filename: string;
+    mimeType: string;
+    storagePath: string;
+    extractedImages?: Array<{ storagePath: string; pageNumber: number }>;
+    division?: string;
+  }>;
 }
 
 function readArchive(): IntakeSession[] {
@@ -369,6 +387,10 @@ function parseAiJson(text: string): any {
   const jsonStart = cleaned.indexOf('{');
   const jsonEnd = cleaned.lastIndexOf('}');
   if (jsonStart >= 0 && jsonEnd > jsonStart) cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+  // Replace smart/curly quotes with straight quotes
+  cleaned = cleaned.replace(/[\u201c\u201d]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  // Strip control characters (except \n and \t which we handle below)
+  cleaned = cleaned.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
   // Fix trailing commas before } or ]
   cleaned = cleaned.replace(/,\s*([\]}])/g, '$1');
   try {
@@ -387,7 +409,39 @@ function parseAiJson(text: string): any {
       if (inString && ch === '\t') { fixed += '\\t'; continue; }
       fixed += ch;
     }
-    return JSON.parse(fixed);
+    try {
+      return JSON.parse(fixed);
+    } catch {
+      // Last resort: escape unescaped quotes inside string values
+      // Heuristic: a quote preceded by a word char and followed by a word char is likely interior
+      let aggressive = '';
+      let inStr = false;
+      let esc = false;
+      for (let i = 0; i < fixed.length; i++) {
+        const ch = fixed[i];
+        if (esc) { aggressive += ch; esc = false; continue; }
+        if (ch === '\\' && inStr) { aggressive += ch; esc = true; continue; }
+        if (ch === '"') {
+          if (!inStr) {
+            inStr = true;
+            aggressive += ch;
+          } else {
+            // Check if this quote ends the string (next non-space is : , ] or })
+            const rest = fixed.slice(i + 1).trimStart();
+            if (rest.length === 0 || /^[,:}\]]/.test(rest)) {
+              inStr = false;
+              aggressive += ch;
+            } else {
+              // Interior quote — escape it
+              aggressive += '\\"';
+            }
+          }
+          continue;
+        }
+        aggressive += ch;
+      }
+      return JSON.parse(aggressive);
+    }
   }
 }
 
@@ -425,12 +479,26 @@ function intakeApiPlugin(): Plugin {
 
         // List all sessions
         if (req.url === '/api/intake/sessions') {
-          const sessions = readArchive().map(s => ({
+          // Auto-expire zombie sessions stuck in 'processing' for over 5 minutes
+          const STALE_MS = 5 * 60 * 1000;
+          const allSessions = readArchive();
+          let dirty = false;
+          for (const s of allSessions) {
+            if (s.status === 'processing' && Date.now() - new Date(s.timestamp).getTime() > STALE_MS) {
+              s.status = 'error';
+              s.error = 'Processing timed out — server may have restarted. Try rerunning.';
+              dirty = true;
+            }
+          }
+          if (dirty) writeArchive(allSessions);
+
+          const sessions = allSessions.map(s => ({
             id: s.id, timestamp: s.timestamp, provider: s.provider, model: s.model,
             status: s.status, sourceExcerpt: s.sourceExcerpt, error: s.error,
             matchCount: s.result?.matches?.length || 0,
             conflictCount: s.result?.conflicts?.length || 0,
             approvals: s.approvals, appliedAt: s.appliedAt,
+            attachmentNames: s.attachments?.map(a => a.filename) || [],
           }));
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(sessions.reverse()));
@@ -886,11 +954,194 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
         }
       });
 
+      // POST /api/kb/person-email — add or update email for a person
+      server.middlewares.use('/api/kb/person-email', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+        try {
+          const body = await readBody(req);
+          const { fileSlug, personName, email } = body;
+          if (!fileSlug || !personName || !email) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'fileSlug, personName, and email are required' }));
+            return;
+          }
+
+          const filePath = path.join(KB_DIR, `${fileSlug}.md`);
+          if (!fs.existsSync(filePath)) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `File not found: ${fileSlug}.md` }));
+            return;
+          }
+
+          let content = fs.readFileSync(filePath, 'utf-8');
+          const lines = content.split('\n');
+          let found = false;
+
+          // Find the ### heading for this person
+          for (let i = 0; i < lines.length; i++) {
+            const headingMatch = lines[i].match(/^###\s+(.+)$/);
+            if (headingMatch && headingMatch[1].trim() === personName) {
+              // Find the role backtick line (next non-empty line after heading)
+              let roleLineIdx = -1;
+              for (let j = i + 1; j < lines.length; j++) {
+                const trimmed = lines[j].trim();
+                if (trimmed === '') continue;
+                if (trimmed.startsWith('`')) { roleLineIdx = j; break; }
+                break; // Non-empty, non-backtick line — no role line
+              }
+
+              // Check if email line already exists
+              const emailLineRegex = /^📧\s*\S+@\S+/;
+              const checkStart = roleLineIdx >= 0 ? roleLineIdx + 1 : i + 1;
+              let emailLineIdx = -1;
+              for (let j = checkStart; j < Math.min(checkStart + 3, lines.length); j++) {
+                if (emailLineRegex.test(lines[j].trim())) { emailLineIdx = j; break; }
+                if (lines[j].trim() !== '' && !emailLineRegex.test(lines[j].trim())) break;
+              }
+
+              if (emailLineIdx >= 0) {
+                // Update existing email line
+                lines[emailLineIdx] = `📧 ${email}`;
+              } else {
+                // Insert email after role line (or after heading if no role line)
+                const insertIdx = roleLineIdx >= 0 ? roleLineIdx + 1 : i + 1;
+                lines.splice(insertIdx, 0, '', `📧 ${email}`);
+              }
+              found = true;
+              break;
+            }
+          }
+
+          if (!found) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `Person not found: ${personName}` }));
+            return;
+          }
+
+          fs.writeFileSync(filePath, lines.join('\n'));
+
+          try {
+            await gitCommit([filePath], `people: add email for ${personName}`);
+          } catch { /* non-fatal */ }
+
+          masterIndex = buildMasterIndex();
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true }));
+        } catch (err: unknown) {
+          console.error('[kb/person-email] Error:', err);
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }));
+          }
+        }
+      });
+
+      // GET /api/attachments — list ALL attachments across divisions
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        if (req.url !== '/api/attachments') return next();
+
+        (async () => {
+          try {
+            const { getApps: getAdminApps } = await import('firebase-admin/app');
+            const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
+            const adminApp = getAdminApps()[0];
+            if (!adminApp) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
+            const adminDb = getAdminFirestore(adminApp);
+            const docs = await listAllAttachments(adminDb);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(docs));
+          } catch (err) {
+            res.statusCode = 500;
+            res.end(`Error: ${(err as Error).message}`);
+          }
+        })();
+      });
+
+      // GET /api/attachments/:division — list attachments for a division
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        const match = req.url?.match(/^\/api\/attachments\/([^/]+)$/);
+        if (!match) return next();
+        const division = decodeURIComponent(match[1]);
+
+        (async () => {
+          try {
+            const { getApps: getAdminApps } = await import('firebase-admin/app');
+            const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
+            const adminApp = getAdminApps()[0];
+            if (!adminApp) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
+            const adminDb = getAdminFirestore(adminApp);
+            const docs = await listAttachments(adminDb, division);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(docs));
+          } catch (err) {
+            res.statusCode = 500;
+            res.end(`Error: ${(err as Error).message}`);
+          }
+        })();
+      });
+
+      // GET /api/attachments/:id/url — generate signed download URL
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        const match = req.url?.match(/^\/api\/attachments\/([^/]+)\/url$/);
+        if (!match) return next();
+
+        (async () => {
+          try {
+            const { getApps: getAdminApps } = await import('firebase-admin/app');
+            const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
+            const { getStorage: getAdminStorage } = await import('firebase-admin/storage');
+            const adminApp = getAdminApps()[0];
+            if (!adminApp) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
+            const adminDb = getAdminFirestore(adminApp);
+            const doc = await adminDb.collection('companies/dtgo/attachments').doc(match[1]).get();
+            if (!doc.exists) { res.statusCode = 404; res.end('Attachment not found'); return; }
+            const data = doc.data()!;
+            const bucket = getAdminStorage(adminApp).bucket();
+            const url = await getSignedUrl(bucket, data.storagePath);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ url }));
+          } catch (err) {
+            res.statusCode = 500;
+            res.end(`Error: ${(err as Error).message}`);
+          }
+        })();
+      });
+
       // POST /api/intake — background processing with master index
       server.middlewares.use('/api/intake', async (req, res) => {
         if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
-        const body = await readBody(req);
-        const { text, provider = 'claude', model: requestModel, systemInstructions } = body;
+
+        // Determine if this is a multipart (file upload) or JSON request
+        const contentType = req.headers['content-type'] || '';
+        let text: string;
+        let provider: string;
+        let requestModel: string | undefined;
+        let systemInstructions: string | undefined;
+        let uploadedFiles: ParsedFile[] = [];
+
+        if (contentType.includes('multipart/form-data')) {
+          const { fields, files } = await readMultipartBody(req);
+          text = fields.text || '';
+          provider = fields.provider || 'claude';
+          requestModel = fields.model;
+          systemInstructions = fields.systemInstructions;
+          uploadedFiles = files;
+        } else {
+          const body = await readBody(req);
+          text = body.text;
+          provider = body.provider || 'claude';
+          requestModel = body.model;
+          systemInstructions = body.systemInstructions;
+        }
+
         const cfg = providerConfigs[provider];
         const key = apiKeys[provider];
 
@@ -924,6 +1175,78 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
 
             let registryContent = '';
             try { registryContent = fs.readFileSync(path.resolve(KB_DIR, '_registry.md'), 'utf-8'); } catch { registryContent = ''; }
+
+            // Extract text/images from uploaded files (PDF, CSV)
+            if (uploadedFiles.length > 0 && apiKeys.gemini) {
+              try {
+                const { extractedText, extractedImages } = await processUploadedFiles(uploadedFiles, apiKeys.gemini);
+                if (extractedText) {
+                  text = text ? `${text}\n\n${extractedText}` : extractedText;
+                  // Update session — prefix sourceExcerpt with filenames for identification
+                  const fileLabel = uploadedFiles.map(f => f.filename).join(', ');
+                  const excerpt = fileLabel + (text ? ` — ${text.slice(0, 150)}` : '');
+                  updateSession(sessionId, { sourceText: text, sourceExcerpt: excerpt.slice(0, 200) });
+                }
+
+                // Upload original files + extracted images to Firebase Storage in background
+                try {
+                  const { getApps: getAdminApps } = await import('firebase-admin/app');
+                  const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
+                  const { getStorage: getAdminStorage } = await import('firebase-admin/storage');
+                  const adminApp = getAdminApps()[0];
+                  if (adminApp) {
+                    const adminDb = getAdminFirestore(adminApp);
+                    const bucket = getAdminStorage(adminApp).bucket();
+                    const attachments: IntakeSession['attachments'] = [];
+
+                    for (const file of uploadedFiles) {
+                      const storagePath = `wiki-attachments/${sessionId}/${file.filename}`;
+                      await uploadToStorage(bucket, storagePath, file.buffer, file.mimeType);
+
+                      const attachmentId = crypto.randomUUID();
+                      const extractedImagePaths: Array<{ storagePath: string; pageNumber: number }> = [];
+
+                      // Upload extracted images for this PDF
+                      if (file.mimeType === 'application/pdf') {
+                        for (let imgIdx = 0; imgIdx < extractedImages.length; imgIdx++) {
+                          const img = extractedImages[imgIdx];
+                          const imgStoragePath = `wiki-attachments/${sessionId}/images/${img.filename}`;
+                          await uploadToStorage(bucket, imgStoragePath, img.buffer, 'image/png');
+                          extractedImagePaths.push({ storagePath: imgStoragePath, pageNumber: img.pageNumber });
+                        }
+                      }
+
+                      attachments!.push({
+                        filename: file.filename,
+                        mimeType: file.mimeType,
+                        storagePath,
+                        extractedImages: extractedImagePaths.length > 0 ? extractedImagePaths : undefined,
+                      });
+
+                      // Save attachment metadata to Firestore
+                      await saveAttachmentMetadata(adminDb, {
+                        id: attachmentId,
+                        filename: file.filename,
+                        mimeType: file.mimeType,
+                        division: '', // set after apply
+                        storagePath,
+                        uploadedAt: new Date().toISOString(),
+                        sessionId,
+                        fileSize: file.buffer.length,
+                        extractedImages: extractedImagePaths.length > 0 ? extractedImagePaths : undefined,
+                      });
+                    }
+
+                    updateSession(sessionId, { attachments });
+                    console.log(`[intake] Uploaded ${uploadedFiles.length} files to Storage`);
+                  }
+                } catch (storageErr) {
+                  console.warn('[intake] Storage upload failed (non-fatal):', (storageErr as Error).message);
+                }
+              } catch (fileErr) {
+                console.warn('[intake] File processing failed:', (fileErr as Error).message);
+              }
+            }
 
             // RAG: retrieve relevant KB chunks via vector search (if available)
             let ragContext = '';

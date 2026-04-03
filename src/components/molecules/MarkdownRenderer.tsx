@@ -9,6 +9,7 @@ import { SourceModal } from './SourceModal';
 import { FormSection } from '@/components/ui/FormSection';
 import { getPersonNames, getPersonRecord } from '@/data/personIndex';
 import { getEntityNames, getEntityRecord } from '@/data/entityIndex';
+import remarkEntityLinks from '@/data/remarkEntityLinks';
 import type { PersonRecord, EntityRecord } from '@/data/types';
 
 function slugify(text: string): string {
@@ -127,6 +128,14 @@ export function MarkdownRenderer({ content, fileSlug }: { content: string; fileS
   const personNameSet = useMemo(() => new Set(getPersonNames()), []);
   const entityNameSet = useMemo(() => new Set(getEntityNames()), []);
 
+  // Unified name→type map for the remark AST scanner
+  const nameTypeMap = useMemo(() => {
+    const map = new Map<string, 'person' | 'entity'>();
+    for (const name of getPersonNames()) map.set(name, 'person');
+    for (const name of getEntityNames()) map.set(name, 'entity');
+    return map;
+  }, []);
+
   const segments = useMemo(() => splitIntoSegments(content), [content]);
 
   // Single delegated click handler — no onClick on individual elements
@@ -195,7 +204,12 @@ export function MarkdownRenderer({ content, fileSlug }: { content: string; fileS
       </h3>
     ),
 
-    strong: ({ children }) => {
+    strong: ({ children, className, ...rest }) => {
+      // Plugin-injected nodes arrive with className already set via hProperties
+      if (className === 'person-link' || className === 'entity-link') {
+        return <strong className={className}>{children}</strong>;
+      }
+      // Legacy: manually bolded names still get detected
       const text = textContent(children);
       if (personNameSet.has(text)) {
         return <strong className="person-link">{children}</strong>;
@@ -246,7 +260,7 @@ export function MarkdownRenderer({ content, fileSlug }: { content: string; fileS
             return (
               <FormSection key={i} title={seg.title} description={seg.description} onEdit={fileSlug ? () => setSectionModal({ title: seg.title, body: seg.body }) : undefined}>
                 <div className="prose">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm, [remarkEntityLinks, { names: nameTypeMap }]]} components={components}>
                     {processedContent(seg.body)}
                   </ReactMarkdown>
                 </div>
@@ -254,7 +268,7 @@ export function MarkdownRenderer({ content, fileSlug }: { content: string; fileS
             );
           }
           return (
-            <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={components}>
+            <ReactMarkdown key={i} remarkPlugins={[remarkGfm, [remarkEntityLinks, { names: nameTypeMap }]]} components={components}>
               {processedContent(seg.content)}
             </ReactMarkdown>
           );

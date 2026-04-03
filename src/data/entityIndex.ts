@@ -55,6 +55,7 @@ const entityFileMap: Record<string, string[]> = {
 
 // Stub entities (no dedicated KB file)
 const stubEntities: { names: string[]; scope: string }[] = [
+  // ── DTGO Group ──
   { names: ['CP Group', 'Charoen Pokphand Group'], scope: "Dhanin Chearavanont's conglomerate" },
   { names: ['CP Land', 'C.P. Land'], scope: 'CP Group property arm, co-founded 1983' },
   { names: ['DTPRM', 'DTP Global REITs Management'], scope: 'REIT management entity under DTP' },
@@ -66,6 +67,35 @@ const stubEntities: { names: string[]; scope: string }[] = [
   { names: ['OKD'], scope: 'T&B social media production unit' },
   { names: ['Translucia', 'Translucia Metaverse'], scope: 'DTGO metaverse brand' },
   { names: ['The Aspen Tree'], scope: 'MQDC senior living brand' },
+  // ── CP Group Ecosystem ──
+  { names: ['Tesco Lotus'], scope: 'CP Group retail brand; part of Amaze super-app data consolidation' },
+  { names: ['Macro'], scope: 'CP Group warehouse retail; part of Amaze super-app data consolidation' },
+  { names: ['CP Axtra', 'CPAXT'], scope: 'CP Group retail/wholesale operator (Makro + Lotus\'s)' },
+  { names: ['7-Eleven'], scope: 'CP Group convenience stores (CP ALL); Cloud 11 live-commerce partner' },
+  { names: ['TrueID'], scope: 'CP Group digital identity/streaming platform; Happitat AI tracking integration' },
+  { names: ['Amaze'], scope: 'CP Group super-app platform consolidating Tesco Lotus, Macro, 7-Eleven, TrueID' },
+  // ── Strategic Partners ──
+  { names: ['Hexagram'], scope: 'External technology partner — advisory and design on MQDC Idyllias sub-projects' },
+  { names: ['Liquid Zoo'], scope: 'External creative partner — advisory and design on MQDC Idyllias sub-projects' },
+  { names: ['Six Senses', 'Six Senses Hotels'], scope: 'Hotel/hospitality partner' },
+  { names: ['Foster + Partners'], scope: 'Architecture partner' },
+  { names: ['Snohetta', 'Snøhetta'], scope: 'Architecture partner (with A49)' },
+  { names: ['Hilton', 'Waldorf Astoria'], scope: 'Hotel/hospitality partner' },
+  { names: ['Marriott International', 'Marriott'], scope: 'Hotel/hospitality partner' },
+  { names: ['YOTEL'], scope: 'Hotel/hospitality partner' },
+  { names: ['IHG', 'Hotel Indigo'], scope: 'Hotel/hospitality partner' },
+  { names: ['Hitachi'], scope: 'Technology partner' },
+  { names: ['Accenture'], scope: 'Technology/consulting partner' },
+  { names: ['Pellar Technology'], scope: 'Technology partner' },
+  { names: ['Bangkok Bank'], scope: 'Finance partner' },
+  { names: ['SCB', 'Siam Commercial Bank'], scope: 'Finance partner' },
+  { names: ['Sygnum Bank'], scope: 'Digital asset banking partner' },
+  { names: ['Baycrest'], scope: 'Canadian healthcare/brain health research partner' },
+  { names: ['Super Siam Realty'], scope: 'Real estate development partner' },
+  { names: ['Thai Obayashi', 'Thai Obayashi Corporation'], scope: 'Construction partner' },
+  { names: ['ITEC Entertainment', 'ITEC'], scope: 'Entertainment/attraction design partner' },
+  { names: ['Two Bulls'], scope: 'Australian technology partner' },
+  { names: ['Muang Thai Life', 'MTL'], scope: 'Insurance partner' },
 ];
 
 // ── Index Builder ──
@@ -124,4 +154,8 @@ export function getEntityNames(): string[] {
 
 export function getEntityRecord(name: string): EntityRecord | undefined {
   return entityLookup.get(name);
+}
+
+export function getEntityNameMap(): Map<string, EntityRecord> {
+  return new Map(entityLookup);
 }

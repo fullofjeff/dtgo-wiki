@@ -1,21 +1,24 @@
 /**
- * ingest-kb.ts — Writes KB chunks to Firestore for vector search.
+ * ingest-kb.ts — Writes KB chunks to Firestore with manual Gemini embeddings.
  *
  * Uses Firebase Admin SDK to write to companies/dtgo/kbChunks.
- * Incremental: only writes new/changed chunks, deletes removed ones.
- * The Firebase Vector Search Extension auto-generates embeddings on write.
+ * Generates embeddings manually via Gemini Embedding API for both text
+ * and image chunks. Supports multimodal RAG — images from PDFs are
+ * embedded alongside text in the same vector space.
  *
  * Usage:
  *   npx tsx scripts/ingest-kb.ts           # incremental update
  *   npx tsx scripts/ingest-kb.ts --force   # re-write all chunks
  *   npx tsx scripts/ingest-kb.ts --dry-run # preview changes only
  *
- * Requires GOOGLE_APPLICATION_CREDENTIALS env var or
- * a service account JSON at scripts/service-account.json
+ * Requires:
+ *   - GOOGLE_APPLICATION_CREDENTIALS env var or ADC (gcloud auth application-default login)
+ *   - GEMINI_API_KEY env var (for embedding generation)
  */
 
 import { initializeApp, cert, type ServiceAccount } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { getStorage } from 'firebase-admin/storage';
 import fs from 'fs';
 import path from 'path';
 import { chunkKnowledgeBase, type KBChunk } from './chunk-kb.js';
@@ -23,18 +26,20 @@ import { chunkKnowledgeBase, type KBChunk } from './chunk-kb.js';
 const COMPANY_ID = 'dtgo';
 const COLLECTION_PATH = `companies/${COMPANY_ID}/kbChunks`;
 const BATCH_SIZE = 500;
+const EMBEDDING_MODEL = 'gemini-embedding-2-preview';
+const EMBEDDING_DIMS = 768;
+const EMBEDDING_BATCH_DELAY_MS = 200; // Rate limit: delay between embedding batches
 
 // Parse CLI flags
 const args = process.argv.slice(2);
 const forceRewrite = args.includes('--force');
 const dryRun = args.includes('--dry-run');
 
+// Load Gemini API key from environment
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+
 // Initialize Firebase Admin — follows ENV_AND_API_KEYS.md protocol
-// Priority: 1) GOOGLE_APPLICATION_CREDENTIALS env var, 2) ADC (gcloud auth application-default login)
 function initFirebase() {
-  // If GOOGLE_APPLICATION_CREDENTIALS points to a file, firebase-admin picks it up automatically.
-  // Otherwise, Application Default Credentials (ADC) from gcloud CLI are used.
-  // No key files stored in the project directory.
   return initializeApp({ projectId: 'phyla-digital-platform' });
 }
 
@@ -48,6 +53,110 @@ async function getExistingChunks(): Promise<Map<string, string>> {
     existing.set(doc.id, doc.data().contentHash as string);
   }
   return existing;
+}
+
+/** Embed text using Gemini Embedding API (direct fetch, no SDK dependency) */
+async function embedText(text: string): Promise<number[] | null> {
+  if (!GEMINI_API_KEY) {
+    console.warn('[ingest] No GEMINI_API_KEY — skipping embedding');
+    return null;
+  }
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: `models/${EMBEDDING_MODEL}`,
+          content: { parts: [{ text }] },
+          taskType: 'RETRIEVAL_DOCUMENT',
+          outputDimensionality: EMBEDDING_DIMS,
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn(`[ingest] Embedding failed (${res.status}):`, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.embedding?.values || null;
+  } catch (err) {
+    console.warn('[ingest] Embedding error:', (err as Error).message);
+    return null;
+  }
+}
+
+/** Embed an image using Gemini Embedding API */
+async function embedImage(base64Data: string, mimeType: string): Promise<number[] | null> {
+  if (!GEMINI_API_KEY) return null;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: `models/${EMBEDDING_MODEL}`,
+          content: { parts: [{ inlineData: { mimeType, data: base64Data } }] },
+          taskType: 'RETRIEVAL_DOCUMENT',
+          outputDimensionality: EMBEDDING_DIMS,
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn(`[ingest] Image embedding failed (${res.status}):`, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.embedding?.values || null;
+  } catch (err) {
+    console.warn('[ingest] Image embedding error:', (err as Error).message);
+    return null;
+  }
+}
+
+/** Summarize an image using Gemini 2.5 Flash */
+async function summarizeImage(base64Data: string, mimeType: string): Promise<string> {
+  if (!GEMINI_API_KEY) return '';
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: 'Describe what this image shows in detail. Include all visible data, labels, and relationships. Be factual and comprehensive.' },
+              { inlineData: { mimeType, data: base64Data } },
+            ],
+          }],
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      },
+    );
+
+    if (!res.ok) return '';
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  } catch {
+    return '';
+  }
+}
+
+/** Sleep helper for rate limiting */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function ingest() {
@@ -104,16 +213,26 @@ async function ingest() {
     return;
   }
 
-  // Write in batches
+  // Write in batches — now with manual embedding generation
   if (toWrite.length > 0) {
-    console.log('Writing chunks...');
+    console.log(`Writing chunks${GEMINI_API_KEY ? ' with manual embeddings' : ' (no API key — embeddings skipped)'}...`);
+
     for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
       const batch = db.batch();
       const batchChunks = toWrite.slice(i, i + BATCH_SIZE);
 
       for (const chunk of batchChunks) {
+        // Generate embedding for this text chunk
+        let embedding: number[] | null = null;
+        if (GEMINI_API_KEY) {
+          embedding = await embedText(chunk.text);
+          // Rate limit
+          await sleep(EMBEDDING_BATCH_DELAY_MS);
+        }
+
         const ref = db.collection(COLLECTION_PATH).doc(chunk.id);
-        batch.set(ref, {
+        const docData: Record<string, any> = {
+          type: 'text',
           fileSlug: chunk.fileSlug,
           fileTitle: chunk.fileTitle,
           sectionHeading: chunk.sectionHeading,
@@ -123,7 +242,13 @@ async function ingest() {
           contentHash: chunk.contentHash,
           entities: chunk.entities,
           updatedAt: FieldValue.serverTimestamp(),
-        });
+        };
+
+        if (embedding) {
+          docData.embedding = FieldValue.vector(embedding);
+        }
+
+        batch.set(ref, docData);
       }
 
       await batch.commit();
@@ -147,8 +272,106 @@ async function ingest() {
     }
   }
 
+  // Process image chunks from Firebase Storage (wiki-attachments)
+  if (GEMINI_API_KEY) {
+    try {
+      const attachmentsSnapshot = await db.collection('companies/dtgo/attachments').get();
+      const imageChunksToWrite: Array<{
+        id: string;
+        fileSlug: string;
+        fileTitle: string;
+        sectionHeading: string;
+        parentHeadings: string[];
+        imageUrl: string;
+        text: string;
+        embedding: number[];
+      }> = [];
+
+      for (const doc of attachmentsSnapshot.docs) {
+        const data = doc.data();
+        if (!data.extractedImages || data.extractedImages.length === 0) continue;
+        const division = data.division || 'unknown';
+
+        for (let imgIdx = 0; imgIdx < data.extractedImages.length; imgIdx++) {
+          const imgInfo = data.extractedImages[imgIdx];
+          const chunkId = `${division}__img_${doc.id.slice(0, 8)}_${imgIdx}`;
+
+          // Skip if chunk already exists and hasn't changed
+          if (existing.has(chunkId) && !forceRewrite) continue;
+
+          try {
+            const bucket = getStorage(app).bucket();
+            const file = bucket.file(imgInfo.storagePath);
+            const [imgBuffer] = await file.download();
+            const base64 = imgBuffer.toString('base64');
+
+            // Summarize the image
+            console.log(`  Summarizing image: ${imgInfo.storagePath}`);
+            const summary = await summarizeImage(base64, 'image/png');
+            await sleep(EMBEDDING_BATCH_DELAY_MS);
+
+            // Embed the image
+            console.log(`  Embedding image: ${imgInfo.storagePath}`);
+            const embedding = await embedImage(base64, 'image/png');
+            await sleep(EMBEDDING_BATCH_DELAY_MS);
+
+            if (embedding) {
+              imageChunksToWrite.push({
+                id: chunkId,
+                fileSlug: division,
+                fileTitle: data.filename || division,
+                sectionHeading: `Image from page ${imgInfo.pageNumber}`,
+                parentHeadings: [data.filename || division],
+                imageUrl: `gs://phyla-digital-platform.firebasestorage.app/${imgInfo.storagePath}`,
+                text: summary || `Image extracted from ${data.filename}`,
+                embedding,
+              });
+            }
+          } catch (imgErr) {
+            console.warn(`  Failed to process image ${imgInfo.storagePath}:`, (imgErr as Error).message);
+          }
+        }
+      }
+
+      // Write image chunks
+      if (imageChunksToWrite.length > 0) {
+        console.log(`\nWriting ${imageChunksToWrite.length} image chunks...`);
+        for (let i = 0; i < imageChunksToWrite.length; i += BATCH_SIZE) {
+          const batch = db.batch();
+          const batchImgs = imageChunksToWrite.slice(i, i + BATCH_SIZE);
+
+          for (const img of batchImgs) {
+            const ref = db.collection(COLLECTION_PATH).doc(img.id);
+            batch.set(ref, {
+              type: 'image',
+              fileSlug: img.fileSlug,
+              fileTitle: img.fileTitle,
+              sectionHeading: img.sectionHeading,
+              parentHeadings: img.parentHeadings,
+              imageUrl: img.imageUrl,
+              text: img.text,
+              contentHash: img.text.slice(0, 64), // Use summary prefix as hash
+              entities: [],
+              embedding: FieldValue.vector(img.embedding),
+              updatedAt: FieldValue.serverTimestamp(),
+            });
+          }
+
+          await batch.commit();
+          console.log(`  Wrote ${batchImgs.length} image chunks`);
+        }
+      }
+    } catch (err) {
+      console.warn('[ingest] Image chunk processing failed (non-fatal):', (err as Error).message);
+    }
+  }
+
   console.log('\nIngestion complete!');
-  console.log(`The Firebase Vector Search Extension will auto-generate embeddings for the ${toWrite.length} written chunks.`);
+  if (GEMINI_API_KEY) {
+    console.log(`Embeddings generated manually via Gemini API for ${toWrite.length} text chunks.`);
+  } else {
+    console.log('No GEMINI_API_KEY set — embeddings were not generated. Set GEMINI_API_KEY to enable manual embedding.');
+  }
 }
 
 ingest().catch((err) => {

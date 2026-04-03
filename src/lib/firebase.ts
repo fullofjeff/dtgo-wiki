@@ -7,6 +7,7 @@ import {
   persistentMultipleTabManager,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { getStorage } from 'firebase/storage';
 
 declare const __FIREBASE_API_KEY__: string;
 
@@ -32,3 +33,4 @@ try {
 
 export { db };
 export const auth = getAuth(app);
+export const storage = getStorage(app);

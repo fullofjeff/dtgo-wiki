@@ -18,11 +18,13 @@ const EMBEDDING_DIMS = 768;
 
 export interface RetrievedChunk {
   id: string;
+  type: 'text' | 'image';
   fileSlug: string;
   fileTitle: string;
   sectionHeading: string;
   parentHeadings: string[];
   text: string;
+  imageUrl?: string;
   entities: string[];
 }
 
@@ -116,11 +118,13 @@ export async function findRelevantChunks(
       const data = doc.data();
       return {
         id: doc.id,
+        type: (data.type as 'text' | 'image') || 'text',
         fileSlug: data.fileSlug,
         fileTitle: data.fileTitle,
         sectionHeading: data.sectionHeading,
         parentHeadings: data.parentHeadings || [],
         text: data.text,
+        imageUrl: data.imageUrl,
         entities: data.entities || [],
       };
     });
@@ -140,7 +144,9 @@ export function formatChunksAsContext(chunks: RetrievedChunk[]): string {
       const breadcrumb = c.parentHeadings.length > 0
         ? `${c.parentHeadings.join(' > ')} > ${c.sectionHeading}`
         : `${c.fileTitle} > ${c.sectionHeading}`;
-      return `--- ${c.fileSlug} / ${breadcrumb} ---\n${c.text}`;
+      const typeTag = c.type === 'image' ? ' [IMAGE]' : '';
+      const imageRef = c.imageUrl ? `\n[Image: ${c.imageUrl}]` : '';
+      return `--- ${c.fileSlug} / ${breadcrumb}${typeTag} ---\n${c.text}${imageRef}`;
     })
     .join('\n\n');
 }

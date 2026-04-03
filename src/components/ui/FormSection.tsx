@@ -8,17 +8,21 @@ interface FormSectionProps {
     children: ReactNode;
     className?: string;
     defaultOpen?: boolean;
+    open?: boolean;
+    onToggle?: (open: boolean) => void;
     onEdit?: () => void;
 }
 
-export function FormSection({ title, description, children, className = '', defaultOpen = false, onEdit }: FormSectionProps) {
-    const [isOpen, setIsOpen] = useState(defaultOpen);
+export function FormSection({ title, description, children, className = '', defaultOpen = false, open, onToggle, onEdit }: FormSectionProps) {
+    const [internalOpen, setInternalOpen] = useState(defaultOpen);
+    const isControlled = open !== undefined;
+    const isOpen = isControlled ? open : internalOpen;
 
     return (
         <div className={`space-y-4 ${className}`}>
             <div
                 className="border-b border-[var(--border-subtle)] pb-2 mb-4 cursor-pointer flex items-center justify-between group select-none"
-                onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
+                onClick={(e) => { e.stopPropagation(); const next = !isOpen; if (isControlled) { onToggle?.(next); } else { setInternalOpen(next); } }}
             >
                 <div className="flex-1 pr-4">
                     <h3 className="text-3xl font-serif italic text-[var(--text-primary)] group-hover:text-[var(--jf-lavender)] transition-colors mb-1.5">

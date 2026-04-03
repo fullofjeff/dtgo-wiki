@@ -3,10 +3,11 @@ import { getAllFiles } from '@/data/loader';
 import { SidebarMenuItem } from '../ui/SidebarMenuItem';
 import {
   Building2, Users, FolderOpen, Clock, Handshake,
-  TreePine, Cloud, Briefcase, FileText, Network, Inbox, Lightbulb
+  TreePine, Cloud, Briefcase, FileText, Network, Inbox, Lightbulb, Paperclip, ClipboardCheck
 } from 'lucide-react';
 
 const businessUnitSlugs = new Set(['mqdc', 'tnb', 'dtp', 'forestias', 'cloud11', 'projects']);
+const hiddenFromBusinessUnits = new Set(['cloud11', 'dtp', 'projects']);
 
 const iconMap: Record<string, typeof Building2> = {
   index: Building2,
@@ -101,6 +102,27 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         collapsed={collapsed}
         onClick={() => navigate('/intake')}
       />
+      <SidebarMenuItem
+        icon={Paperclip}
+        label="Files"
+        isActive={location.pathname === '/attachments'}
+        collapsed={collapsed}
+        onClick={() => navigate('/attachments')}
+      />
+      <SidebarMenuItem
+        icon={ClipboardCheck}
+        label="Approvals"
+        isActive={location.pathname === '/approvals'}
+        collapsed={collapsed}
+        onClick={() => navigate('/approvals')}
+      />
+      <SidebarMenuItem
+        icon={Users}
+        label="Directory"
+        isActive={location.pathname === '/directory'}
+        collapsed={collapsed}
+        onClick={() => navigate('/directory')}
+      />
 
       {/* Business Units */}
       {!collapsed && (
@@ -115,7 +137,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
           Business Units
         </div>
       )}
-      {files.filter(f => businessUnitSlugs.has(f.slug)).map(file => {
+      {files.filter(f => businessUnitSlugs.has(f.slug) && !hiddenFromBusinessUnits.has(f.slug)).map(file => {
         const Icon = iconMap[file.slug] || FileText;
         const isActive = location.pathname === `/file/${file.slug}`;
         return (
@@ -129,6 +151,13 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
           />
         );
       })}
+      <SidebarMenuItem
+        icon={FolderOpen}
+        label="Projects"
+        isActive={location.pathname === '/projects'}
+        collapsed={collapsed}
+        onClick={() => navigate('/projects')}
+      />
 
       {/* Knowledge Base */}
       {!collapsed && (
@@ -144,7 +173,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         </div>
       )}
       <div className="flex-1 overflow-y-auto">
-        {files.filter(f => !businessUnitSlugs.has(f.slug) && f.slug !== 'history' && (!f.slug.includes('/') || f.slug.endsWith('/index'))).map(file => {
+        {files.filter(f => !businessUnitSlugs.has(f.slug) && f.slug !== 'history' && f.slug !== 'people/index' && f.slug !== 'partnerships' && (!f.slug.includes('/') || f.slug.endsWith('/index'))).map(file => {
           const Icon = iconMap[file.slug] || FileText;
           const isActive = location.pathname === `/file/${file.slug}`;
           return (

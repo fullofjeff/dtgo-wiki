@@ -1,58 +1,13 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { getAllFiles } from '@/data/loader';
-import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Check, X, CheckCheck, ChevronDown, Clock, ArrowRight, Pencil, Trash2, RotateCcw, ExternalLink } from 'lucide-react';
+import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Check, X, CheckCheck, ChevronDown, Clock, ArrowRight, Pencil, Trash2, RotateCcw, ExternalLink, Upload, FileUp, File as FileIcon } from 'lucide-react';
 import { ModelChip } from '@/components/model/ModelChip';
 import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ModelVariantsConfig } from '@/types/models';
-
-// ── Types ──
-
-interface IntakeCorrection {
-  original: string;
-  corrected: string;
-  reason: string;
-}
-
-interface IntakeMatch {
-  file: string;
-  section: string;
-  action: 'update' | 'append' | 'conflict' | 'new_section' | 'duplicate';
-  summary: string;
-  content: string;
-  corrections?: IntakeCorrection[];
-  isDuplicate?: boolean;
-}
-
-interface IntakeClarification {
-  question: string;
-  context: string;
-  options: string[];
-}
-
-interface IntakeResult {
-  matches: IntakeMatch[];
-  conflicts: string[];
-  newFiles: string[];
-  summary: string;
-  clarifications?: IntakeClarification[];
-}
-
-interface IntakeSession {
-  id: string;
-  timestamp: string;
-  provider: string;
-  model: string;
-  status: 'processing' | 'ready' | 'error';
-  sourceExcerpt: string;
-  result?: IntakeResult;
-  error?: string;
-  approvals: Record<string, 'approved' | 'rejected'>;
-  appliedAt?: string;
-  matchCount?: number;
-}
+import type { IntakeCorrection, IntakeMatch, IntakeClarification, IntakeResult, IntakeSession } from '@/types/intake';
 
 interface ProviderVariant { id: string; name: string; description?: string; }
 interface ProviderInfo { id: string; name: string; defaultModel: string; variants: ProviderVariant[]; }
@@ -254,6 +209,8 @@ export function IntakePage() {
   const [conflictResolutions, setConflictResolutions] = useState<Record<number, string>>({});
   const [stagedConflicts, setStagedConflicts] = useState<Set<number>>(new Set());
   const [successMessage, setSuccessMessage] = useState<{ title: string; subtitle: string } | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch providers and seed localStorage
@@ -301,6 +258,7 @@ export function IntakePage() {
         if (session.status === 'ready') {
           setResult(normalizeResult(session.result));
           setProcessing(false);
+          setContentEdits({});
           clearInterval(pollRef.current!);
           loadPastSessions();
         } else if (session.status === 'error') {
@@ -315,7 +273,7 @@ export function IntakePage() {
   }, [sessionId, loadPastSessions]);
 
   const handleProcess = async () => {
-    if (!text.trim()) return;
+    if (!text.trim() && uploadedFiles.length === 0) return;
     setProcessing(true);
     setError(null);
     setResult(null);
@@ -324,22 +282,39 @@ export function IntakePage() {
     setApplyResult(null);
 
     try {
-      const res = await fetch('/api/intake', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: text.trim(),
-          provider: selectedProvider,
-          model: selectedModel,
-          systemInstructions: systemInstructions.trim() || undefined,
-        }),
-      });
+      let res: Response;
+
+      if (uploadedFiles.length > 0) {
+        // Use FormData for file uploads
+        const formData = new FormData();
+        formData.append('text', text.trim());
+        formData.append('provider', selectedProvider);
+        formData.append('model', selectedModel);
+        if (systemInstructions.trim()) formData.append('systemInstructions', systemInstructions.trim());
+        for (const file of uploadedFiles) formData.append('files', file);
+
+        res = await fetch('/api/intake', { method: 'POST', body: formData });
+      } else {
+        // JSON for text-only submissions
+        res = await fetch('/api/intake', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text.trim(),
+            provider: selectedProvider,
+            model: selectedModel,
+            systemInstructions: systemInstructions.trim() || undefined,
+          }),
+        });
+      }
+
       const data = await res.json();
       if (data.sessionId) {
         setSessionId(data.sessionId);
         setSuccessMessage({ title: 'Submitted Successfully', subtitle: 'Processing in background. Results will appear in your session history.' });
         setText('');
         setSystemInstructions('');
+        setUploadedFiles([]);
         setProcessing(false);
       } else {
         setError('Failed to start processing');
@@ -453,6 +428,7 @@ export function IntakePage() {
           setRejectedItems(new Set());
           setClarificationAnswers({});
           setConflictResolutions({});
+          setContentEdits({});
           setApplyResult(null);
         }
         setReprocessing(false);
@@ -470,6 +446,9 @@ export function IntakePage() {
       const session = await res.json();
       setSessionId(session.id);
       // Reset ephemeral state from previous session
+      setProcessing(false);
+      setApplying(false);
+      setReprocessing(false);
       setContentEdits({});
       setConflictResolutions({});
       setStagedConflicts(new Set());
@@ -800,7 +779,10 @@ export function IntakePage() {
         onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: row.original }); }}
         style={{ fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '300px', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0, textDecoration: 'underline', textDecorationColor: 'var(--border-default)', textUnderlineOffset: '3px' }}
         title="Click to view full source text"
-      >{row.original.sourceExcerpt}</button>
+      >{row.original.attachmentNames?.length
+        ? row.original.attachmentNames.join(', ')
+        : row.original.sourceExcerpt
+      }</button>
     ) },
     {
       accessorKey: 'status',
@@ -881,11 +863,79 @@ export function IntakePage() {
           onBlur={e => (e.target.style.borderColor = 'var(--border-default)')}
         />
 
+        {/* File upload drop zone */}
+        <div
+          onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = 'var(--jf-gold)'; }}
+          onDragLeave={e => { e.currentTarget.style.borderColor = 'var(--border-default)'; }}
+          onDrop={e => {
+            e.preventDefault();
+            e.currentTarget.style.borderColor = 'var(--border-default)';
+            const droppedFiles = Array.from(e.dataTransfer.files).filter(
+              f => f.type === 'application/pdf' || f.name.endsWith('.csv') || f.type === 'text/csv'
+            );
+            if (droppedFiles.length > 0) setUploadedFiles(prev => [...prev, ...droppedFiles]);
+          }}
+          onClick={() => fileInputRef.current?.click()}
+          style={{
+            marginTop: '8px',
+            padding: '14px',
+            border: '2px dashed var(--border-default)',
+            borderRadius: 'var(--radius-input)',
+            cursor: 'pointer',
+            textAlign: 'center',
+            transition: 'border-color 0.2s',
+          }}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.csv"
+            multiple
+            style={{ display: 'none' }}
+            onChange={e => {
+              const files = Array.from(e.target.files || []);
+              if (files.length > 0) setUploadedFiles(prev => [...prev, ...files]);
+              e.target.value = '';
+            }}
+          />
+          <div className="flex items-center justify-center gap-2" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            <Upload size={14} />
+            <span>Drop PDF or CSV files here, or click to browse</span>
+          </div>
+        </div>
+
+        {/* Uploaded files list */}
+        {uploadedFiles.length > 0 && (
+          <div style={{ marginTop: '8px', display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            {uploadedFiles.map((file, idx) => (
+              <div
+                key={`${file.name}-${idx}`}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  padding: '4px 10px', background: 'var(--bg-surface-inset)',
+                  border: '1px solid var(--border-default)', borderRadius: '6px',
+                  fontSize: '12px', color: 'var(--text-primary)',
+                }}
+              >
+                {file.type === 'application/pdf' ? <FileText size={12} style={{ color: 'var(--jf-gold)' }} /> : <FileIcon size={12} style={{ color: 'var(--dtgo-green)' }} />}
+                <span style={{ maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>
+                <span style={{ color: 'var(--text-secondary)' }}>({(file.size / 1024).toFixed(0)} KB)</span>
+                <button
+                  onClick={e => { e.stopPropagation(); setUploadedFiles(prev => prev.filter((_, i) => i !== idx)); }}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--text-secondary)' }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Action bar */}
         <div className="flex items-center justify-between" style={{ marginTop: '12px' }}>
           <div className="flex items-center gap-2">
-            {(result || text) && (
-              <button onClick={handleReset} style={{
+            {(result || text || uploadedFiles.length > 0) && (
+              <button onClick={() => { handleReset(); setUploadedFiles([]); }} style={{
                 display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: 'none',
                 border: '1px solid var(--border-default)', borderRadius: 'var(--radius-input)',
                 fontSize: '13px', fontWeight: 500, color: 'var(--text-secondary)', cursor: 'pointer',
@@ -898,15 +948,15 @@ export function IntakePage() {
               color: showSettings ? 'var(--jf-lavender)' : 'var(--text-secondary)', cursor: 'pointer',
             }}><Settings size={15} /></button>
           </div>
-          <button onClick={handleProcess} disabled={processing || !text.trim()} style={{
-            padding: '10px 24px', cursor: processing || !text.trim() ? 'not-allowed' : 'pointer',
-            opacity: processing || !text.trim() ? 0.5 : 1, display: 'flex', alignItems: 'center', gap: '8px',
+          <button onClick={handleProcess} disabled={processing || (!text.trim() && uploadedFiles.length === 0)} style={{
+            padding: '10px 24px', cursor: processing || (!text.trim() && uploadedFiles.length === 0) ? 'not-allowed' : 'pointer',
+            opacity: processing || (!text.trim() && uploadedFiles.length === 0) ? 0.5 : 1, display: 'flex', alignItems: 'center', gap: '8px',
             fontSize: '14px', fontWeight: 600, color: 'var(--jf-cream)',
             background: 'rgba(216, 131, 10, 0.15)', border: '1px solid rgba(216, 131, 10, 0.3)',
             borderRadius: 'var(--radius-input)', transition: 'all 0.2s',
           }}>
             {processing ? <Loader2 size={16} className="animate-spin" /> : <Inbox size={16} />}
-            {processing ? 'Processing...' : 'Process'}
+            {processing ? 'Processing...' : uploadedFiles.length > 0 ? `Process (${uploadedFiles.length} file${uploadedFiles.length > 1 ? 's' : ''})` : 'Process'}
           </button>
         </div>
       </div>

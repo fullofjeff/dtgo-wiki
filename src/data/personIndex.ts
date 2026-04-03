@@ -124,10 +124,14 @@ function buildPersonIndex(): { lookup: Map<string, PersonRecord>; records: Perso
         }
       } else {
         // New person
+        const emailMatch = body.match(/📧\s*(\S+@\S+)/);
         const record: PersonRecord = {
           canonicalName: nameOnly,
           aliases: [],
           bio: body,
+          bioFileSlug: file.slug,
+          bioHeading: fullHeading,
+          email: emailMatch ? emailMatch[1] : undefined,
           mentions: [],
         };
 
@@ -193,4 +197,8 @@ export function getPersonSection(name: string): string | undefined {
 
 export function getPersonRecord(name: string): PersonRecord | undefined {
   return personLookup.get(name);
+}
+
+export function getPersonNameMap(): Map<string, PersonRecord> {
+  return new Map(personLookup);
 }

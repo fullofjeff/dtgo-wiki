@@ -17,9 +17,10 @@ interface DataTableProps<T> {
     searchPlaceholder?: string;
     externalFilter?: string;
     getRowStyle?: (row: T) => React.CSSProperties | undefined;
+    tableLayout?: 'auto' | 'fixed';
 }
 
-export function DataTable<T>({ data, columns, actions, hideSearch = true, searchPlaceholder = 'Search...', externalFilter, getRowStyle }: DataTableProps<T>) {
+export function DataTable<T>({ data, columns, actions, hideSearch = true, searchPlaceholder = 'Search...', externalFilter, getRowStyle, tableLayout = 'auto' }: DataTableProps<T>) {
     const [sorting, setSorting] = useState<SortingState>([]);
     const [globalFilter, setGlobalFilter] = useState('');
 
@@ -67,7 +68,7 @@ export function DataTable<T>({ data, columns, actions, hideSearch = true, search
             )}
 
             <div style={{ overflowX: 'auto', borderRadius: '8px', border: '1px solid var(--border-default)' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout }}>
                     <thead>
                         {table.getHeaderGroups().map((headerGroup) => (
                             <tr key={headerGroup.id} style={{ background: 'var(--bg-surface-inset)' }}>
@@ -87,9 +88,14 @@ export function DataTable<T>({ data, columns, actions, hideSearch = true, search
                                             userSelect: 'none',
                                             borderBottom: '1px solid var(--border-default)',
                                             whiteSpace: 'nowrap',
+                                            ...(header.column.columnDef.meta as any)?.style,
                                         }}
                                     >
-                                        <div className="flex items-center gap-1">
+                                        <div className="flex items-center gap-1" style={{
+                                            justifyContent: (header.column.columnDef.meta as any)?.style?.textAlign === 'center' ? 'center'
+                                                : (header.column.columnDef.meta as any)?.style?.textAlign === 'right' ? 'flex-end'
+                                                : undefined,
+                                        }}>
                                             {flexRender(header.column.columnDef.header, header.getContext())}
                                             {{
                                                 asc: <span style={{ opacity: 0.7 }}>↑</span>,
@@ -126,6 +132,7 @@ export function DataTable<T>({ data, columns, actions, hideSearch = true, search
                                                 fontSize: '13px',
                                                 color: 'var(--text-primary)',
                                                 verticalAlign: 'top',
+                                                ...(cell.column.columnDef.meta as any)?.style,
                                             }}
                                         >
                                             {flexRender(cell.column.columnDef.cell, cell.getContext())}
