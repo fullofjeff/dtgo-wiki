@@ -49,7 +49,7 @@ function ModalOverlay() {
   );
 }
 
-type ContentSize = 'sm' | 'md' | 'lg' | 'xl' | '2xl';
+type ContentSize = 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '4xl' | '5xl' | 'full';
 
 interface ModalContentProps {
   children: React.ReactNode;
@@ -63,6 +63,9 @@ const sizeClasses: Record<ContentSize, string> = {
   lg: 'max-w-lg',
   xl: 'max-w-xl',
   '2xl': 'max-w-2xl',
+  '4xl': 'max-w-4xl',
+  '5xl': 'max-w-5xl',
+  'full': 'max-w-[90vw]',
 };
 
 function ModalContent({ children, size = 'md', className = '' }: ModalContentProps) {

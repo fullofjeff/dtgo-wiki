@@ -8,10 +8,12 @@ import { SearchPage } from './components/pages/SearchPage';
 import { OrgChartPage } from './components/pages/OrgChartPage';
 import { IntakePage } from './components/pages/IntakePage';
 import { TimelinePage } from './components/pages/TimelinePage';
-import { AttachmentsPage } from './components/pages/AttachmentsPage';
 import { ApprovalsPage } from './components/pages/ApprovalsPage';
 import { DirectoryPage } from './components/pages/DirectoryPage';
 import { ProjectsPage } from './components/pages/ProjectsPage';
+import { ZonesPage } from './components/pages/ZonesPage';
+import { TechDirectoryPage } from './components/pages/TechDirectoryPage';
+import { SettingsPage } from './components/pages/SettingsPage';
 
 export default function App() {
   return (
@@ -24,10 +26,12 @@ export default function App() {
         <Route path="org-chart" element={<OrgChartPage />} />
         <Route path="timeline" element={<TimelinePage />} />
         <Route path="intake" element={<IntakePage />} />
-        <Route path="attachments" element={<AttachmentsPage />} />
         <Route path="approvals" element={<ApprovalsPage />} />
+        <Route path="zones" element={<ZonesPage />} />
+        <Route path="tech" element={<TechDirectoryPage />} />
         <Route path="directory" element={<DirectoryPage />} />
         <Route path="projects" element={<ProjectsPage />} />
+        <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   );

@@ -122,7 +122,7 @@ export function FilePage() {
         )}
 
         <div className="prose">
-          <MarkdownRenderer content={slug && highlightStats[slug] ? file.content.replace(/^#\s+.+\n*/m, '') : file.content} fileSlug={slug} />
+          <MarkdownRenderer content={slug && highlightStats[slug] ? file.content.replace(/^#\s+.+\n*/m, '') : file.content} fileSlug={slug} parentH1={slug && highlightStats[slug] ? file.title : undefined} />
         </div>
 
         <AttachmentPanel division={slug} />

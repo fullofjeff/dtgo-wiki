@@ -45,8 +45,8 @@ export function ModelVariantList({
                         </div>
 
                         <div className="flex items-center gap-1.5 shrink-0">
-                            {isDefault && <Badge variant="default">DEFAULT</Badge>}
-                            {isSelected && <Badge variant="selected">✓</Badge>}
+                            {isDefault && <Badge color="default">DEFAULT</Badge>}
+                            {isSelected && <Badge color="info">✓</Badge>}
                         </div>
                     </DropdownItem>
                 );

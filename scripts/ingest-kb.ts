@@ -55,73 +55,117 @@ async function getExistingChunks(): Promise<Map<string, string>> {
   return existing;
 }
 
-/** Embed text using Gemini Embedding API (direct fetch, no SDK dependency) */
+const EMBEDDING_MAX_RETRIES = 3;
+const EMBEDDING_RETRY_BASE_MS = 1000;
+
+/** Embed text using Gemini Embedding API with retry + exponential backoff */
 async function embedText(text: string): Promise<number[] | null> {
   if (!GEMINI_API_KEY) {
     console.warn('[ingest] No GEMINI_API_KEY — skipping embedding');
     return null;
   }
 
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: `models/${EMBEDDING_MODEL}`,
-          content: { parts: [{ text }] },
-          taskType: 'RETRIEVAL_DOCUMENT',
-          outputDimensionality: EMBEDDING_DIMS,
-        }),
-      },
-    );
+  for (let attempt = 0; attempt <= EMBEDDING_MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: `models/${EMBEDDING_MODEL}`,
+            content: { parts: [{ text }] },
+            taskType: 'RETRIEVAL_DOCUMENT',
+            outputDimensionality: EMBEDDING_DIMS,
+          }),
+        },
+      );
 
-    if (!res.ok) {
+      if (res.ok) {
+        const data = await res.json();
+        return data.embedding?.values || null;
+      }
+
       const errText = await res.text();
+      const isRetryable = res.status === 429 || res.status >= 500;
+
+      if (isRetryable && attempt < EMBEDDING_MAX_RETRIES) {
+        const retryAfter = res.headers.get('retry-after');
+        const delayMs = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : EMBEDDING_RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(`[ingest] Embedding failed (${res.status}), retrying in ${delayMs}ms (attempt ${attempt + 1}/${EMBEDDING_MAX_RETRIES})`);
+        await sleep(delayMs);
+        continue;
+      }
+
       console.warn(`[ingest] Embedding failed (${res.status}):`, errText);
       return null;
+    } catch (err) {
+      if (attempt < EMBEDDING_MAX_RETRIES) {
+        const delayMs = EMBEDDING_RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(`[ingest] Embedding error: ${(err as Error).message}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${EMBEDDING_MAX_RETRIES})`);
+        await sleep(delayMs);
+        continue;
+      }
+      console.warn('[ingest] Embedding error (all retries exhausted):', (err as Error).message);
+      return null;
     }
-
-    const data = await res.json();
-    return data.embedding?.values || null;
-  } catch (err) {
-    console.warn('[ingest] Embedding error:', (err as Error).message);
-    return null;
   }
+  return null;
 }
 
-/** Embed an image using Gemini Embedding API */
+/** Embed an image using Gemini Embedding API with retry + exponential backoff */
 async function embedImage(base64Data: string, mimeType: string): Promise<number[] | null> {
   if (!GEMINI_API_KEY) return null;
 
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: `models/${EMBEDDING_MODEL}`,
-          content: { parts: [{ inlineData: { mimeType, data: base64Data } }] },
-          taskType: 'RETRIEVAL_DOCUMENT',
-          outputDimensionality: EMBEDDING_DIMS,
-        }),
-      },
-    );
+  for (let attempt = 0; attempt <= EMBEDDING_MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: `models/${EMBEDDING_MODEL}`,
+            content: { parts: [{ inlineData: { mimeType, data: base64Data } }] },
+            taskType: 'RETRIEVAL_DOCUMENT',
+            outputDimensionality: EMBEDDING_DIMS,
+          }),
+        },
+      );
 
-    if (!res.ok) {
+      if (res.ok) {
+        const data = await res.json();
+        return data.embedding?.values || null;
+      }
+
       const errText = await res.text();
+      const isRetryable = res.status === 429 || res.status >= 500;
+
+      if (isRetryable && attempt < EMBEDDING_MAX_RETRIES) {
+        const delayMs = res.headers.get('retry-after')
+          ? parseInt(res.headers.get('retry-after')!, 10) * 1000
+          : EMBEDDING_RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(`[ingest] Image embedding failed (${res.status}), retrying in ${delayMs}ms (attempt ${attempt + 1}/${EMBEDDING_MAX_RETRIES})`);
+        await sleep(delayMs);
+        continue;
+      }
+
       console.warn(`[ingest] Image embedding failed (${res.status}):`, errText);
       return null;
+    } catch (err) {
+      if (attempt < EMBEDDING_MAX_RETRIES) {
+        const delayMs = EMBEDDING_RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(`[ingest] Image embedding error: ${(err as Error).message}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${EMBEDDING_MAX_RETRIES})`);
+        await sleep(delayMs);
+        continue;
+      }
+      console.warn('[ingest] Image embedding error (all retries exhausted):', (err as Error).message);
+      return null;
     }
-
-    const data = await res.json();
-    return data.embedding?.values || null;
-  } catch (err) {
-    console.warn('[ingest] Image embedding error:', (err as Error).message);
-    return null;
   }
+  return null;
 }
 
 /** Summarize an image using Gemini 2.5 Flash */
@@ -213,6 +257,9 @@ async function ingest() {
     return;
   }
 
+  // Track embedding failures for final report
+  const failedEmbeddings: string[] = [];
+
   // Write in batches — now with manual embedding generation
   if (toWrite.length > 0) {
     console.log(`Writing chunks${GEMINI_API_KEY ? ' with manual embeddings' : ' (no API key — embeddings skipped)'}...`);
@@ -228,6 +275,14 @@ async function ingest() {
           embedding = await embedText(chunk.text);
           // Rate limit
           await sleep(EMBEDDING_BATCH_DELAY_MS);
+        }
+
+        // Guard: do NOT write chunks without embeddings — they become ghost chunks
+        // invisible to vector search, silently degrading RAG quality
+        if (GEMINI_API_KEY && !embedding) {
+          failedEmbeddings.push(chunk.id);
+          console.warn(`  SKIPPED ${chunk.id} — embedding failed after retries`);
+          continue;
         }
 
         const ref = db.collection(COLLECTION_PATH).doc(chunk.id);
@@ -368,7 +423,15 @@ async function ingest() {
 
   console.log('\nIngestion complete!');
   if (GEMINI_API_KEY) {
-    console.log(`Embeddings generated manually via Gemini API for ${toWrite.length} text chunks.`);
+    const written = toWrite.length - failedEmbeddings.length;
+    console.log(`Embeddings generated manually via Gemini API: ${written} succeeded, ${failedEmbeddings.length} failed.`);
+    if (failedEmbeddings.length > 0) {
+      console.warn(`\n⚠ ${failedEmbeddings.length} chunk(s) SKIPPED due to embedding failures (not written to Firestore):`);
+      for (const id of failedEmbeddings) {
+        console.warn(`  - ${id}`);
+      }
+      console.warn('Re-run with --force to retry these chunks.');
+    }
   } else {
     console.log('No GEMINI_API_KEY set — embeddings were not generated. Set GEMINI_API_KEY to enable manual embedding.');
   }

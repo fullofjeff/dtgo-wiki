@@ -17,12 +17,15 @@ interface DataTableProps<T> {
     searchPlaceholder?: string;
     externalFilter?: string;
     getRowStyle?: (row: T) => React.CSSProperties | undefined;
+    getRowAccentColor?: (row: T) => string | undefined;
     tableLayout?: 'auto' | 'fixed';
+    onRowContextMenu?: (row: T, event: React.MouseEvent<HTMLTableRowElement>) => void;
 }
 
-export function DataTable<T>({ data, columns, actions, hideSearch = true, searchPlaceholder = 'Search...', externalFilter, getRowStyle, tableLayout = 'auto' }: DataTableProps<T>) {
+export function DataTable<T>({ data, columns, actions, hideSearch = true, searchPlaceholder = 'Search...', externalFilter, getRowStyle, getRowAccentColor, tableLayout = 'auto', onRowContextMenu }: DataTableProps<T>) {
     const [sorting, setSorting] = useState<SortingState>([]);
     const [globalFilter, setGlobalFilter] = useState('');
+    const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
 
     const table = useReactTable({
         data,
@@ -109,20 +112,25 @@ export function DataTable<T>({ data, columns, actions, hideSearch = true, search
                     </thead>
                     <tbody>
                         {table.getRowModel().rows.length > 0 ? (
-                            table.getRowModel().rows.map((row) => (
+                            table.getRowModel().rows.map((row) => {
+                                const accentColor = getRowAccentColor?.(row.original);
+                                const isHovered = hoveredRowId === row.id;
+                                const { background: customBg, ...restCustomStyle } = getRowStyle?.(row.original) || {};
+                                return (
                                 <tr
                                     key={row.id}
                                     style={{
                                         borderBottom: '1px solid var(--border-default)',
-                                        transition: 'background 0.15s',
-                                        ...getRowStyle?.(row.original),
+                                        transition: 'background 0.15s, box-shadow 200ms cubic-bezier(0.25, 0.1, 0.25, 1)',
+                                        background: isHovered ? 'rgba(216, 131, 10, 0.04)' : (customBg as string || ''),
+                                        boxShadow: accentColor
+                                            ? `inset ${isHovered ? '8px' : '3px'} 0 0 ${accentColor}`
+                                            : undefined,
+                                        ...restCustomStyle,
                                     }}
-                                    onMouseEnter={(e) => {
-                                        e.currentTarget.style.background = 'rgba(216, 131, 10, 0.04)';
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        e.currentTarget.style.background = getRowStyle?.(row.original)?.background as string || '';
-                                    }}
+                                    onMouseEnter={() => setHoveredRowId(row.id)}
+                                    onMouseLeave={() => setHoveredRowId(null)}
+                                    onContextMenu={onRowContextMenu ? (e) => { e.preventDefault(); onRowContextMenu(row.original, e); } : undefined}
                                 >
                                     {row.getVisibleCells().map((cell) => (
                                         <td
@@ -139,7 +147,8 @@ export function DataTable<T>({ data, columns, actions, hideSearch = true, search
                                         </td>
                                     ))}
                                 </tr>
-                            ))
+                                );
+                            })
                         ) : (
                             <tr>
                                 <td

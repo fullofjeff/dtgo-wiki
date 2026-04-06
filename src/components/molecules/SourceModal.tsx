@@ -66,9 +66,9 @@ export function SourceModal({ open, onClose, sessionIdPrefix }: SourceModalProps
                   <span style={{ textTransform: 'capitalize' }}>{session.provider}</span> · {session.model}
                 </div>
                 {session.appliedAt ? (
-                  <Badge variant="selected">Applied {new Date(session.appliedAt).toLocaleDateString()}</Badge>
+                  <Badge color="info">Applied {new Date(session.appliedAt).toLocaleDateString()}</Badge>
                 ) : (
-                  <Badge variant="default">{session.status}</Badge>
+                  <Badge color="default">{session.status}</Badge>
                 )}
               </div>
 

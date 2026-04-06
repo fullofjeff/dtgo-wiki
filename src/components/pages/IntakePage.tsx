@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { getAllFiles } from '@/data/loader';
-import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Check, X, CheckCheck, ChevronDown, Clock, ArrowRight, Pencil, Trash2, RotateCcw, ExternalLink, Upload, FileUp, File as FileIcon } from 'lucide-react';
+import { Inbox, Loader2, FileText, AlertTriangle, Plus, RefreshCw, Settings, Check, X, CheckCheck, ChevronDown, Clock, ArrowRight, Pencil, Trash2, RotateCcw, ExternalLink, Upload, FileUp, File as FileIcon, Sparkles, Ban } from 'lucide-react';
 import { ModelChip } from '@/components/model/ModelChip';
 import { DataTable } from '@/components/ui/DataTable';
 import { Badge } from '@/components/ui/Badge';
@@ -8,18 +8,12 @@ import { Modal } from '@/components/ui/Modal';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ModelVariantsConfig } from '@/types/models';
 import type { IntakeCorrection, IntakeMatch, IntakeClarification, IntakeResult, IntakeSession } from '@/types/intake';
+import { actionLabels, normalizeResult, getSessionState } from '@/lib/intakeConstants';
+import { ChatCard } from '@/components/molecules/ChatCard';
 
 interface ProviderVariant { id: string; name: string; description?: string; }
 interface ProviderInfo { id: string; name: string; defaultModel: string; variants: ProviderVariant[]; }
 
-const actionLabels: Record<string, { label: string; color: string }> = {
-  update: { label: 'Update', color: 'var(--mqdc-blue)' },
-  append: { label: 'Append', color: 'var(--dtgo-green)' },
-  conflict: { label: 'Conflict', color: 'var(--dtp-pink)' },
-  new_section: { label: 'New Section', color: 'var(--tnb-orange)' },
-  duplicate: { label: 'Duplicate', color: 'var(--text-secondary)' },
-  clarification: { label: 'Needs Input', color: 'var(--jf-gold)' },
-};
 
 // Edit modal for modifying proposed content via right-click
 function EditContentModal({ open, onClose, content, onSave }: {
@@ -169,17 +163,6 @@ function ClarificationCell({ idx, options, initial, onChange }: {
   );
 }
 
-/** Ensure an IntakeResult has all required fields with safe defaults */
-function normalizeResult(r: any): IntakeResult {
-  if (!r || typeof r !== 'object') return { summary: '', matches: [], newFiles: [], conflicts: [] };
-  return {
-    summary: r.summary || '',
-    matches: Array.isArray(r.matches) ? r.matches : [],
-    newFiles: Array.isArray(r.newFiles) ? r.newFiles.map((f: any) => typeof f === 'string' ? f : (f.path || f.name || JSON.stringify(f))) : [],
-    conflicts: Array.isArray(r.conflicts) ? r.conflicts.map((c: any) => typeof c === 'string' ? c : (c.original || c.description || JSON.stringify(c))) : [],
-    clarifications: Array.isArray(r.clarifications) ? r.clarifications : undefined,
-  };
-}
 
 export function IntakePage() {
   const [text, setText] = useState('');
@@ -206,6 +189,11 @@ export function IntakePage() {
   const [sourceModalText, setSourceModalText] = useState<string | null>(null);
   const [sourceModalLoading, setSourceModalLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; session: IntakeSession } | null>(null);
+  const [rejectionReasonsMap, setRejectionReasonsMap] = useState<Record<number, string>>({});
+  const [matchContextMenu, setMatchContextMenu] = useState<{ x: number; y: number; idx: number } | null>(null);
+  const [aiRecommendations, setAiRecommendations] = useState<Record<number, { recommendation: string; reason: string; duplicateOf?: string; confidence?: string }>>({});
+  const [reevalLoading, setReevalLoading] = useState<Set<number>>(new Set());
+  const [showReasonInput, setShowReasonInput] = useState<number | null>(null);
   const [conflictResolutions, setConflictResolutions] = useState<Record<number, string>>({});
   const [stagedConflicts, setStagedConflicts] = useState<Set<number>>(new Set());
   const [successMessage, setSuccessMessage] = useState<{ title: string; subtitle: string } | null>(null);
@@ -309,6 +297,15 @@ export function IntakePage() {
       }
 
       const data = await res.json();
+      if (!res.ok) {
+        if (data.error === 'duplicate_source') {
+          setError(`This text was already processed in session ${data.existingSessionId?.slice(0, 8)}. Check session history.`);
+        } else {
+          setError(data.message || 'Failed to start processing');
+        }
+        setProcessing(false);
+        return;
+      }
       if (data.sessionId) {
         setSessionId(data.sessionId);
         setSuccessMessage({ title: 'Submitted Successfully', subtitle: 'Processing in background. Results will appear in your session history.' });
@@ -377,10 +374,13 @@ export function IntakePage() {
         approvedItems.forEach(i => { approvals[String(i)] = 'approved'; });
         rejectedItems.forEach(i => { approvals[String(i)] = 'rejected'; });
 
+        const reasonsPayload: Record<string, string> = {};
+        Object.entries(rejectionReasonsMap).forEach(([k, v]) => { if (v) reasonsPayload[k] = v; });
+
         const res = await fetch('/api/intake/apply', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId, approvals, contentEdits }),
+          body: JSON.stringify({ sessionId, approvals, contentEdits, rejectionReasons: reasonsPayload }),
         });
         if (!res.ok) {
           setApplyResult(`Error: ${await res.text()}`);
@@ -531,6 +531,24 @@ export function IntakePage() {
     }
   };
 
+  // Re-evaluate a single match with AI
+  const handleReeval = async (idx: number) => {
+    if (!sessionId) return;
+    setReevalLoading(prev => { const s = new Set(prev); s.add(idx); return s; });
+    try {
+      const res = await fetch('/api/intake/reeval-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, matchIndex: idx }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiRecommendations(prev => ({ ...prev, [idx]: data }));
+      }
+    } catch { /* ignore */ }
+    setReevalLoading(prev => { const s = new Set(prev); s.delete(idx); return s; });
+  };
+
   // Close context menu on click outside
   useEffect(() => {
     if (!contextMenu) return;
@@ -538,6 +556,14 @@ export function IntakePage() {
     window.addEventListener('click', handler);
     return () => window.removeEventListener('click', handler);
   }, [contextMenu]);
+
+  // Close match context menu on click outside
+  useEffect(() => {
+    if (!matchContextMenu) return;
+    const handler = () => setMatchContextMenu(null);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [matchContextMenu]);
 
   // ── Table columns ──
 
@@ -698,10 +724,10 @@ export function IntakePage() {
         if (isClarification) {
           const answer = clarificationAnswersRef.current[idx];
           const answered = answer?.selected || answer?.note;
-          return answered ? <Badge variant="selected">Staged</Badge> : <Badge variant="default">?</Badge>;
+          return answered ? <Badge color="info">Staged</Badge> : <Badge color="default">?</Badge>;
         }
 
-        if (isDupe) return <Badge variant="info">Skip</Badge>;
+        if (isDupe) return <Badge color="neutral">Skip</Badge>;
 
         if (reprocessing || applying) return (
           <div className="flex items-center gap-1">
@@ -710,47 +736,97 @@ export function IntakePage() {
           </div>
         );
 
+        const aiRec = aiRecommendations[idx];
+        const isEvaluating = reevalLoading.has(idx);
+
+        // AI recommendation badge
+        const aiRecBadge = isEvaluating ? (
+          <div className="flex items-center gap-1" style={{ marginTop: '2px' }}>
+            <Loader2 size={10} className="animate-spin" style={{ color: 'var(--jf-lavender)' }} />
+            <span style={{ fontSize: '9px', color: 'var(--jf-lavender)' }}>Evaluating…</span>
+          </div>
+        ) : aiRec ? (
+          <div className="flex items-center gap-1" style={{ marginTop: '2px', cursor: 'default' }}
+            title={`${aiRec.reason}${aiRec.duplicateOf ? ` (duplicate of: ${aiRec.duplicateOf})` : ''}`}>
+            <Sparkles size={9} style={{ color: aiRec.recommendation === 'approve' ? '#50e3c2' : 'var(--dtp-pink)' }} />
+            <span style={{ fontSize: '9px', color: aiRec.recommendation === 'approve' ? '#50e3c2' : 'var(--dtp-pink)', fontWeight: 600 }}>
+              AI: {aiRec.recommendation === 'approve' ? 'Approve' : 'Reject'}
+            </span>
+          </div>
+        ) : null;
+
         if (isApproved) return (
-          <div className="flex items-center gap-1">
-            <Badge variant="selected">Approved</Badge>
-            <button onClick={() => setApprovedItems(prev => { const s = new Set(prev); s.delete(idx); return s; })}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }} title="Undo">
-              <X size={12} />
-            </button>
+          <div>
+            <div className="flex items-center gap-1">
+              <Badge color="info">Approved</Badge>
+              <button onClick={() => setApprovedItems(prev => { const s = new Set(prev); s.delete(idx); return s; })}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }} title="Undo">
+                <X size={12} />
+              </button>
+            </div>
+            {aiRecBadge}
           </div>
         );
 
         if (isRejected) return (
-          <div className="flex items-center gap-1">
-            <Badge variant="info">Rejected</Badge>
-            <button onClick={() => setRejectedItems(prev => { const s = new Set(prev); s.delete(idx); return s; })}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }} title="Undo">
-              <X size={12} />
-            </button>
+          <div>
+            <div className="flex items-center gap-1">
+              <Badge color="neutral">Rejected</Badge>
+              <button onClick={() => setRejectedItems(prev => { const s = new Set(prev); s.delete(idx); return s; })}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-secondary)' }} title="Undo">
+                <X size={12} />
+              </button>
+            </div>
+            {showReasonInput === idx ? (
+              <input autoFocus placeholder="Reason (optional)"
+                value={rejectionReasonsMap[idx] || ''}
+                onChange={e => setRejectionReasonsMap(prev => ({ ...prev, [idx]: e.target.value }))}
+                onBlur={() => setShowReasonInput(null)}
+                onKeyDown={e => { if (e.key === 'Enter') setShowReasonInput(null); }}
+                style={{
+                  width: '100%', marginTop: '4px', padding: '3px 6px', fontSize: '10px',
+                  background: 'var(--bg-input)', border: '1px solid var(--border-default)',
+                  borderRadius: '4px', color: 'var(--text-primary)', outline: 'none',
+                }}
+              />
+            ) : (
+              <button onClick={() => setShowReasonInput(idx)}
+                style={{ fontSize: '9px', color: 'var(--text-secondary)', background: 'none', border: 'none', cursor: 'pointer', marginTop: '2px', textDecoration: 'underline', textUnderlineOffset: '2px' }}>
+                {rejectionReasonsMap[idx] ? `"${rejectionReasonsMap[idx].slice(0, 20)}…"` : '+ reason'}
+              </button>
+            )}
+            {aiRecBadge}
           </div>
         );
 
         const isEdited = idx in contentEdits;
         return (
-          <div className="flex items-center gap-1">
-            {isEdited && <Badge variant="warning">Edited</Badge>}
-            <button onClick={() => handleApprove(idx)} disabled={isEdited} title={isEdited ? 'Refine first to apply edits' : 'Approve'} style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
-              borderRadius: '6px', background: 'rgba(16, 163, 127, 0.1)', border: '1px solid rgba(16, 163, 127, 0.25)',
-              color: '#50e3c2', cursor: isEdited ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
-              opacity: isEdited ? 0.3 : 1,
-            }}><Check size={14} /></button>
-            <button onClick={() => handleReject(idx)} disabled={isEdited} title={isEdited ? 'Refine first to apply edits' : 'Reject'} style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
-              borderRadius: '6px', background: 'rgba(232, 67, 147, 0.1)', border: '1px solid rgba(232, 67, 147, 0.25)',
-              color: 'var(--dtp-pink)', cursor: isEdited ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
-              opacity: isEdited ? 0.3 : 1,
-            }}><X size={14} /></button>
+          <div
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMatchContextMenu({ x: e.clientX, y: e.clientY, idx }); }}
+            style={{ cursor: 'context-menu' }}
+            title="Right-click for more options"
+          >
+            <div className="flex items-center gap-1">
+              {isEdited && <Badge color="warning">Edited</Badge>}
+              <button onClick={() => handleApprove(idx)} disabled={isEdited} title={isEdited ? 'Refine first to apply edits' : 'Approve'} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
+                borderRadius: '6px', background: 'rgba(16, 163, 127, 0.1)', border: '1px solid rgba(16, 163, 127, 0.25)',
+                color: '#50e3c2', cursor: isEdited ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
+                opacity: isEdited ? 0.3 : 1,
+              }}><Check size={14} /></button>
+              <button onClick={() => { handleReject(idx); setShowReasonInput(idx); }} disabled={isEdited} title={isEdited ? 'Refine first to apply edits' : 'Reject'} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
+                borderRadius: '6px', background: 'rgba(232, 67, 147, 0.1)', border: '1px solid rgba(232, 67, 147, 0.25)',
+                color: 'var(--dtp-pink)', cursor: isEdited ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
+                opacity: isEdited ? 0.3 : 1,
+              }}><X size={14} /></button>
+            </div>
+            {aiRecBadge}
           </div>
         );
       },
     },
-  ], [approvedItems, rejectedItems, contentEdits, clarificationAnswers, applying, reprocessing]);
+  ], [approvedItems, rejectedItems, contentEdits, clarificationAnswers, applying, reprocessing, aiRecommendations, reevalLoading, rejectionReasonsMap, showReasonInput]);
 
   // ── Past sessions columns ──
 
@@ -792,11 +868,15 @@ export function IntakePage() {
         const wrap = (el: React.ReactNode) => (
           <span onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: row.original }); }}>{el}</span>
         );
-        if (s.appliedAt) return wrap(<Badge variant="selected">Applied</Badge>);
-        if (s.status === 'ready' && s.conflictCount > 0) return wrap(<span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--dtp-pink)', fontWeight: 700, padding: '3px 8px', borderRadius: '4px', background: 'color-mix(in srgb, var(--dtp-pink) 10%, transparent)' }}>Conflict</span>);
-        if (s.status === 'ready') return wrap(<Badge variant="default">Ready</Badge>);
-        if (s.status === 'error') return wrap(<span title={s.error || 'Unknown error'}><Badge variant="info">Error</Badge></span>);
-        return wrap(<Badge variant="info">Processing</Badge>);
+        const state = getSessionState(s);
+        if (state === 'applied') return wrap(<Badge color="info">Applied</Badge>);
+        if (state === 'partially_applied') return wrap(<Badge color="warning">Partial</Badge>);
+        if (state === 'all_rejected') return wrap(<Badge color="error">Rejected</Badge>);
+        if (state === 'resolved') return wrap(<Badge color="neutral">Resolved</Badge>);
+        if (s.status === 'ready' && s.conflictCount > 0) return wrap(<Badge color="dtp">Conflict</Badge>);
+        if (s.status === 'ready') return wrap(<Badge color="default">Ready</Badge>);
+        if (s.status === 'error') return wrap(<span title={s.error || 'Unknown error'}><Badge color="error">Error</Badge></span>);
+        return wrap(<Badge color="neutral">Processing</Badge>);
       },
     },
     {
@@ -819,11 +899,14 @@ export function IntakePage() {
 
   return (
     <div>
+      {/* Chat with Knowledge Base */}
+      <ChatCard />
+
       {/* Header + Source Material */}
       <div className="wiki-card" style={{ padding: '24px', marginBottom: '16px' }}>
         <div className="flex items-center justify-between" style={{ marginBottom: '4px' }}>
           <h1 style={{ fontFamily: 'var(--font-serif)', fontSize: '2.2rem', fontWeight: 600, color: 'var(--jf-cream)' }}>
-            Intake
+            Data Intake
           </h1>
           <ModelChip
             provider={selectedProvider}
@@ -842,9 +925,6 @@ export function IntakePage() {
             onVariantChange={(variantId) => setSelectedModel(variantId)}
           />
         </div>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '14px', fontWeight: 300, marginBottom: '16px' }}>
-          Paste text from any source — meeting notes, articles, transcripts — and AI will identify which knowledge base files to update.
-        </p>
         <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--jf-lavender)', fontWeight: 600, marginBottom: '10px' }}>
           Source Material
         </div>
@@ -1274,6 +1354,47 @@ export function IntakePage() {
           >
             <Trash2 size={13} />
             Delete
+          </button>
+        </div>
+      )}
+
+      {/* Match context menu */}
+      {matchContextMenu && (
+        <div
+          style={{
+            position: 'fixed', top: matchContextMenu.y, left: matchContextMenu.x, zIndex: 10003,
+            background: '#1a1a1a', border: '1px solid #333', borderRadius: '8px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)', overflow: 'hidden', minWidth: '180px',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => { handleReeval(matchContextMenu.idx); setMatchContextMenu(null); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '10px', width: '100%',
+              padding: '10px 14px', fontSize: '12px', fontWeight: 500,
+              background: 'none', border: 'none', color: 'var(--text-primary)',
+              cursor: 'pointer', textAlign: 'left',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(201,207,233,0.08)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <Sparkles size={13} style={{ color: 'var(--jf-lavender)' }} />
+            Re-evaluate with AI
+          </button>
+          <button
+            onClick={() => { setEditingIdx(matchContextMenu.idx); setMatchContextMenu(null); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '10px', width: '100%',
+              padding: '10px 14px', fontSize: '12px', fontWeight: 500,
+              background: 'none', border: 'none', color: 'var(--text-primary)',
+              cursor: 'pointer', textAlign: 'left',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(201,207,233,0.08)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <Pencil size={13} style={{ color: 'var(--jf-gold)' }} />
+            Edit Content
           </button>
         </div>
       )}

@@ -70,23 +70,41 @@ export function HomePage() {
         <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--jf-lavender)', fontWeight: 600, marginBottom: '12px' }}>
           Group Structure
         </div>
-        <div className="grid grid-cols-3 gap-4">
-          {entities.map(entity => (
-            <Link
-              key={entity.slug}
-              to={`/file/${entity.slug}`}
-              className="wiki-card wiki-card-clickable accent-top"
-              style={{ borderTopColor: entity.color, padding: '28px 24px' }}
-            >
-              <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: entity.color, fontWeight: 700, marginBottom: '4px' }}>
-                {entity.name}
-              </div>
-              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 300, marginBottom: '16px' }}>
-                {entity.desc}
-              </div>
-              <ArrowRight size={14} style={{ color: 'var(--text-secondary)', opacity: 0.5 }} />
-            </Link>
-          ))}
+        <div className="grid gap-6" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
+          {entities.map(entity => {
+            const Icon = iconMap[entity.slug] || Building2;
+            return (
+              <Link
+                key={entity.slug}
+                to={`/file/${entity.slug}`}
+                className="wiki-card wiki-card-clickable"
+              >
+                <div className="flex flex-col items-center text-center" style={{ padding: '32px', gap: '4px', minHeight: '280px', maxHeight: '320px', justifyContent: 'flex-start' }}>
+                  <div
+                    className="flex items-center justify-center h-20 w-20 rounded-full flex-shrink-0"
+                    style={{
+                      background: 'var(--bg-surface-inset)',
+                      border: '1px solid var(--border-subtle)',
+                      boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)',
+                      marginBottom: '4px',
+                    }}
+                  >
+                    <div className="w-10 h-10 flex items-center justify-center">
+                      <Icon size={40} style={{ color: entity.color, opacity: 0.8 }} />
+                    </div>
+                  </div>
+                  <div className="flex items-center" style={{ marginTop: '12px', marginBottom: '16px' }}>
+                    <h3 style={{ fontSize: '19px', fontWeight: 'bold', color: entity.color, fontFamily: 'var(--font-sans)', lineHeight: 1.2 }}>
+                      {entity.name}
+                    </h3>
+                  </div>
+                  <p style={{ fontFamily: 'var(--font-sans)', fontWeight: 300, color: 'var(--text-secondary)', fontSize: '14px', lineHeight: 1.6, maxWidth: '80%', margin: '0 auto' }}>
+                    {entity.desc}
+                  </p>
+                </div>
+              </Link>
+            );
+          })}
         </div>
       </div>
 
@@ -95,7 +113,7 @@ export function HomePage() {
         <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '2px', color: 'var(--jf-lavender)', fontWeight: 600, marginBottom: '12px' }}>
           All Files
         </div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-6" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
           {files.map(file => {
             const Icon = iconMap[file.slug] || FileText;
             const color = colorMap[file.slug] || 'var(--text-secondary)';
@@ -104,28 +122,31 @@ export function HomePage() {
                 key={file.slug}
                 to={`/file/${file.slug}`}
                 className="wiki-card wiki-card-clickable"
-                style={{ padding: '20px 24px' }}
               >
-                <div className="flex items-start gap-4">
+                <div className="flex flex-col items-center text-center" style={{ padding: '32px', gap: '4px', minHeight: '280px', maxHeight: '320px', justifyContent: 'flex-start' }}>
                   <div
-                    className="flex items-center justify-center flex-shrink-0 rounded-full"
+                    className="flex items-center justify-center h-20 w-20 rounded-full flex-shrink-0"
                     style={{
-                      width: 36, height: 36,
                       background: 'var(--bg-surface-inset)',
                       border: '1px solid var(--border-subtle)',
                       boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)',
+                      marginBottom: '4px',
                     }}
                   >
-                    <Icon size={16} style={{ color, opacity: 0.8 }} />
+                    <div className="w-10 h-10 flex items-center justify-center">
+                      <Icon size={40} style={{ color, opacity: 0.8 }} />
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                  <div className="flex items-center" style={{ marginTop: '12px', marginBottom: '16px' }}>
+                    <h3 style={{ fontSize: '19px', fontWeight: 'bold', color: 'var(--text-primary)', fontFamily: 'var(--font-sans)', lineHeight: 1.2 }}>
                       {file.title}
-                    </div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 300, lineHeight: 1.5 }} className="line-clamp-2">
-                      {file.scope}
-                    </div>
+                    </h3>
                   </div>
+                  {file.scope && (
+                    <p style={{ fontFamily: 'var(--font-sans)', fontWeight: 300, color: 'var(--text-secondary)', fontSize: '14px', lineHeight: 1.6, maxWidth: '80%', margin: '0 auto' }} className="line-clamp-3">
+                      {file.scope}
+                    </p>
+                  )}
                 </div>
               </Link>
             );

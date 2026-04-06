@@ -37,8 +37,10 @@ export interface IntakeSession {
   sourceExcerpt: string;
   result?: IntakeResult;
   error?: string;
-  approvals: Record<string, 'approved' | 'rejected'>;
+  approvals: Record<string, 'approved' | 'rejected' | 'dismissed'>;
+  rejectionReasons?: Record<string, string>;
   appliedAt?: string;
+  resolvedAt?: string;
   matchCount?: number;
   conflictCount?: number;
   attachmentNames?: string[];

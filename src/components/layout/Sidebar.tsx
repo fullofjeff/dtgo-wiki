@@ -3,7 +3,7 @@ import { getAllFiles } from '@/data/loader';
 import { SidebarMenuItem } from '../ui/SidebarMenuItem';
 import {
   Building2, Users, FolderOpen, Clock, Handshake,
-  TreePine, Cloud, Briefcase, FileText, Network, Inbox, Lightbulb, Paperclip, ClipboardCheck
+  TreePine, Cloud, Briefcase, FileText, Network, Bot, Lightbulb, ClipboardCheck, MapPin, Cpu, Settings
 } from 'lucide-react';
 
 const businessUnitSlugs = new Set(['mqdc', 'tnb', 'dtp', 'forestias', 'cloud11', 'projects']);
@@ -96,18 +96,11 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         onClick={() => navigate('/timeline')}
       />
       <SidebarMenuItem
-        icon={Inbox}
-        label="Intake"
+        icon={Bot}
+        label="Agent"
         isActive={location.pathname === '/intake'}
         collapsed={collapsed}
         onClick={() => navigate('/intake')}
-      />
-      <SidebarMenuItem
-        icon={Paperclip}
-        label="Files"
-        isActive={location.pathname === '/attachments'}
-        collapsed={collapsed}
-        onClick={() => navigate('/attachments')}
       />
       <SidebarMenuItem
         icon={ClipboardCheck}
@@ -122,6 +115,13 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         isActive={location.pathname === '/directory'}
         collapsed={collapsed}
         onClick={() => navigate('/directory')}
+      />
+      <SidebarMenuItem
+        icon={Settings}
+        label="System Health"
+        isActive={location.pathname === '/settings'}
+        collapsed={collapsed}
+        onClick={() => navigate('/settings')}
       />
 
       {/* Business Units */}
@@ -172,6 +172,20 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
           Knowledge Base
         </div>
       )}
+      <SidebarMenuItem
+        icon={MapPin}
+        label="Experience Planning"
+        isActive={location.pathname === '/zones'}
+        collapsed={collapsed}
+        onClick={() => navigate('/zones')}
+      />
+      <SidebarMenuItem
+        icon={Cpu}
+        label="Technology Directory"
+        isActive={location.pathname === '/tech'}
+        collapsed={collapsed}
+        onClick={() => navigate('/tech')}
+      />
       <div className="flex-1 overflow-y-auto">
         {files.filter(f => !businessUnitSlugs.has(f.slug) && f.slug !== 'history' && f.slug !== 'people/index' && f.slug !== 'partnerships' && (!f.slug.includes('/') || f.slug.endsWith('/index'))).map(file => {
           const Icon = iconMap[file.slug] || FileText;

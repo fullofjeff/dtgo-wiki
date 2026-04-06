@@ -248,6 +248,13 @@ body {
   font-weight: 300;
 }
 
+/* ── Chip shake animation ── */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px); }
+  75% { transform: translateX(2px); }
+}
+
 /* ── React Flow dark theme overrides ── */
 .react-flow__handle.org-handle {
   width: 6px;

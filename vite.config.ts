@@ -5,7 +5,8 @@ import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { exec } from 'node:child_process'
-import { findRelevantChunks, formatChunksAsContext } from './scripts/rag-retriever.js'
+import { findRelevantChunks, formatChunksAsContext, getAdminDb } from './scripts/rag-retriever.js'
+import { chunkKnowledgeBase } from './scripts/chunk-kb.js'
 import {
   readMultipartBody,
   processUploadedFiles,
@@ -137,9 +138,124 @@ const providerConfigs: Record<string, ProviderConfig> = {
   },
 };
 
-// ── Archive helpers ──
+// ── Chat archive helpers ──
 
 const KB_DIR = path.resolve(__dirname, 'knowledge-base');
+const CHAT_ARCHIVE_PATH = path.resolve(KB_DIR, 'data/chat-archive.json');
+
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  provider: string;
+  model: string;
+  messages: ChatMessage[];
+}
+
+function readChatArchive(): ChatSession[] {
+  try { return JSON.parse(fs.readFileSync(CHAT_ARCHIVE_PATH, 'utf-8')); }
+  catch { return []; }
+}
+
+function writeChatArchive(sessions: ChatSession[]) {
+  fs.writeFileSync(CHAT_ARCHIVE_PATH, JSON.stringify(sessions, null, 2));
+}
+
+/** Build a streaming request for a given provider */
+function buildStreamRequest(
+  provider: string, key: string, model: string, systemPrompt: string, messages: ChatMessage[]
+): { url: string; init: RequestInit } | null {
+  const convMessages = messages.filter(m => m.role !== 'system');
+
+  switch (provider) {
+    case 'claude': {
+      return {
+        url: 'https://api.anthropic.com/v1/messages',
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({
+            model, max_tokens: 8192, stream: true,
+            system: systemPrompt,
+            messages: convMessages.map(m => ({ role: m.role, content: m.content })),
+          }),
+        },
+      };
+    }
+    case 'openai':
+    case 'grok': {
+      const isReasoning = model.startsWith('o3') || model.startsWith('o4');
+      const baseUrl = provider === 'grok' ? 'https://api.x.ai' : 'https://api.openai.com';
+      return {
+        url: `${baseUrl}/v1/chat/completions`,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            model, stream: true,
+            ...(isReasoning ? { reasoning_effort: 'high' } : { max_tokens: 8192 }),
+            messages: [
+              { role: isReasoning ? 'developer' : 'system', content: systemPrompt },
+              ...convMessages.map(m => ({ role: m.role, content: m.content })),
+            ],
+          }),
+        },
+      };
+    }
+    case 'gemini': {
+      const contents = convMessages.map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
+      return {
+        url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${key}`,
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents,
+            generationConfig: { maxOutputTokens: 8192 },
+          }),
+        },
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Extract a content token from a provider's SSE data line */
+function parseStreamChunk(provider: string, dataStr: string): string | null {
+  if (dataStr === '[DONE]') return null;
+  try {
+    const data = JSON.parse(dataStr);
+    switch (provider) {
+      case 'claude':
+        if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta') return data.delta.text;
+        return null;
+      case 'openai':
+      case 'grok':
+        return data.choices?.[0]?.delta?.content || null;
+      case 'gemini':
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+// ── Intake archive helpers ──
+
 const ARCHIVE_PATH = path.resolve(KB_DIR, 'data/intake-archive.json');
 
 interface IntakeSession {
@@ -164,19 +280,30 @@ interface IntakeSession {
   }>;
 }
 
+// Archive lock to prevent concurrent read-modify-write races
+let archiveLock: Promise<void> = Promise.resolve();
+
 function readArchive(): IntakeSession[] {
   try { return JSON.parse(fs.readFileSync(ARCHIVE_PATH, 'utf-8')); }
   catch { return []; }
 }
 
+/** Atomic write: write to temp file, then rename over archive to prevent corruption on crash */
 function writeArchive(sessions: IntakeSession[]) {
-  fs.writeFileSync(ARCHIVE_PATH, JSON.stringify(sessions, null, 2));
+  const tmpPath = ARCHIVE_PATH + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(sessions, null, 2));
+  fs.renameSync(tmpPath, ARCHIVE_PATH);
 }
 
+/** Serialized update: queues through archiveLock to prevent concurrent read-modify-write races */
 function updateSession(id: string, patch: Partial<IntakeSession>) {
-  const sessions = readArchive();
-  const idx = sessions.findIndex(s => s.id === id);
-  if (idx >= 0) { sessions[idx] = { ...sessions[idx], ...patch }; writeArchive(sessions); }
+  archiveLock = archiveLock.then(() => {
+    const sessions = readArchive();
+    const idx = sessions.findIndex(s => s.id === id);
+    if (idx >= 0) { sessions[idx] = { ...sessions[idx], ...patch }; writeArchive(sessions); }
+  }).catch((err) => {
+    console.error('[archive] Failed to update session:', err);
+  });
 }
 
 // ── Master Index builder (mirrors personIndex.ts logic, server-side) ──
@@ -310,6 +437,155 @@ function buildMasterIndex() {
   return { files, knownPeople };
 }
 
+// ── Registry loader (entity → file/section mapping) ──
+
+interface RegistryEntry {
+  entity: string;
+  file: string;
+  section: string;
+}
+
+function loadRegistry(): RegistryEntry[] {
+  try {
+    const raw = fs.readFileSync(path.join(KB_DIR, '_registry.md'), 'utf-8');
+    const entries: RegistryEntry[] = [];
+    const rowRegex = /^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|/gm;
+    let m;
+    while ((m = rowRegex.exec(raw)) !== null) {
+      const entity = m[1].trim();
+      const file = m[2].trim();
+      const section = m[3].trim();
+      if (entity === 'Entity' || entity.startsWith('---')) continue;
+      entries.push({ entity, file: file.replace(/\.md$/, '').replace(/(^|\/)_/g, '$1'), section });
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+// ── Local KB search (fallback when RAG is unavailable) ──
+
+function localKbSearch(
+  query: string,
+  masterIdx: ReturnType<typeof buildMasterIndex>,
+  registry: RegistryEntry[],
+  topK = 6,
+): string | null {
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+
+  // Score each registry entry by keyword overlap with query
+  const scored: { entry: RegistryEntry; score: number }[] = [];
+  for (const entry of registry) {
+    const entityLower = entry.entity.toLowerCase();
+    let score = 0;
+
+    // Exact entity match in query
+    if (queryLower.includes(entityLower)) score += 10;
+    // Entity contains query
+    if (entityLower.includes(queryLower)) score += 8;
+    // Section match
+    const sectionLower = entry.section.toLowerCase().replace(/^#+\s*/, '');
+    if (queryLower.includes(sectionLower)) score += 8;
+    // Term overlap
+    for (const term of queryTerms) {
+      if (entityLower.includes(term)) score += 2;
+      if (sectionLower.includes(term)) score += 1;
+    }
+
+    if (score > 0) scored.push({ entry, score });
+  }
+
+  // Also check masterIndex files for title/scope/entity matches
+  for (const file of masterIdx.files) {
+    const titleLower = (file.title || '').toLowerCase();
+    const scopeLower = (file.scope || '').toLowerCase();
+    let fileScore = 0;
+    for (const term of queryTerms) {
+      if (titleLower.includes(term)) fileScore += 3;
+      if (scopeLower.includes(term)) fileScore += 1;
+    }
+    if (fileScore > 0) {
+      // Add file-level entry
+      scored.push({ entry: { entity: file.title, file: file.slug, section: '' }, score: fileScore });
+    }
+
+    // Check entities within files
+    for (const entity of (file.entities || [])) {
+      const entLower = entity.toLowerCase();
+      if (queryLower.includes(entLower) || entLower.includes(queryLower)) {
+        scored.push({ entry: { entity, file: file.slug, section: '' }, score: 6 });
+      }
+    }
+  }
+
+  // Also check aliases (knownPeople)
+  for (const [name, info] of Object.entries(masterIdx.knownPeople)) {
+    const allNames = [name, ...info.aliases].map(n => n.toLowerCase());
+    for (const alias of allNames) {
+      if (queryLower.includes(alias) || alias.includes(queryLower)) {
+        scored.push({
+          entry: { entity: name, file: info.file, section: info.section },
+          score: 7,
+        });
+        break;
+      }
+    }
+  }
+
+  if (scored.length === 0) return null;
+
+  // Deduplicate by file+section, keep highest score
+  const deduped = new Map<string, { entry: RegistryEntry; score: number }>();
+  for (const item of scored) {
+    const key = `${item.entry.file}::${item.entry.section}`;
+    const existing = deduped.get(key);
+    if (!existing || item.score > existing.score) deduped.set(key, item);
+  }
+
+  const topResults = Array.from(deduped.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+
+  // Read section content from disk
+  const contextParts: string[] = [];
+  for (const { entry } of topResults) {
+    try {
+      let filePath = path.join(KB_DIR, `${entry.file}.md`);
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(KB_DIR, `_${entry.file}.md`);
+      }
+      if (!fs.existsSync(filePath)) continue;
+
+      const raw = fs.readFileSync(filePath, 'utf-8');
+
+      if (entry.section) {
+        // Extract specific section
+        const headingMatch = entry.section.match(/^(#{1,6})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          const heading = headingMatch[2].trim();
+          const body = extractSectionBody(raw, heading, level);
+          if (body) {
+            contextParts.push(`--- ${entry.file} / ${entry.section} ---\n${body.slice(0, 2000)}`);
+            continue;
+          }
+        }
+      }
+
+      // Fall back to file-level content (strip frontmatter, take first 2000 chars)
+      const bodyMatch = raw.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
+      const body = bodyMatch ? bodyMatch[1] : raw;
+      contextParts.push(`--- ${entry.file} ---\n${body.slice(0, 2000)}`);
+    } catch {
+      continue;
+    }
+  }
+
+  return contextParts.length > 0 ? contextParts.join('\n\n') : null;
+}
+
 // ── Apply changes to .md files ──
 
 function applyFindReplace(filePath: string, searchPattern: string, replacement: string) {
@@ -321,52 +597,103 @@ function applyFindReplace(filePath: string, searchPattern: string, replacement: 
   fs.writeFileSync(filePath, raw);
 }
 
-function applyMatchToFile(filePath: string, section: string, action: string, content: string) {
+interface PendingEdit {
+  section: string;
+  action: string;
+  content: string;
+}
+
+/**
+ * Apply multiple edits to a single file in one read-write cycle.
+ * Edits targeting existing sections are applied bottom-to-top (by section position)
+ * to prevent earlier insertions from shifting the positions of later targets.
+ * New sections and unmatched edits are appended at the end.
+ */
+function applyEditsToFile(filePath: string, edits: PendingEdit[]) {
   let raw = fs.readFileSync(filePath, 'utf-8');
 
-  // Update frontmatter date
+  // Update frontmatter date once
   const today = new Date().toISOString().slice(0, 10);
   raw = raw.replace(/^(updated:\s*)"?[^"\n]*"?/m, `$1"${today}"`);
 
-  if (action === 'new_section') {
-    raw = raw.trimEnd() + `\n\n## ${section}\n\n${content}\n`;
-  } else if (section) {
-    // Find the ## section
-    const sectionRegex = new RegExp(`^(##\\s+${section.replace(/^##\\s*/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`, 'm');
-    const match = sectionRegex.exec(raw);
-    if (match) {
-      const insertPos = match.index + match[0].length;
-      // Find next ## heading
-      const rest = raw.slice(insertPos);
-      const nextH2 = rest.search(/\n##\s+/);
-      if (action === 'append') {
-        const insertAt = nextH2 >= 0 ? insertPos + nextH2 : raw.length;
-        raw = raw.slice(0, insertAt).trimEnd() + '\n\n' + content + '\n' + raw.slice(insertAt);
-      } else if (action === 'update') {
-        const endPos = nextH2 >= 0 ? insertPos + nextH2 : raw.length;
-        raw = raw.slice(0, insertPos) + '\n\n' + content + '\n' + raw.slice(endPos);
-      } else if (action === 'conflict') {
-        const insertAt = nextH2 >= 0 ? insertPos + nextH2 : raw.length;
-        raw = raw.slice(0, insertAt).trimEnd() + '\n\n> ⚠️ CONFLICT\n> ' + content.replace(/\n/g, '\n> ') + '\n' + raw.slice(insertAt);
-      }
+  // Deduplicate: skip appends whose ### heading already exists in file
+  const dedupedEdits = edits.filter(edit => {
+    if (edit.action !== 'append') return true;
+    const h3Match = edit.content.match(/^###\s+(.+?)(?:\s*—|$)/m);
+    if (!h3Match) return true;
+    const personName = h3Match[1].trim();
+    const escapedName = personName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return !new RegExp(`^###\\s+${escapedName}`, 'm').test(raw);
+  });
+
+  // Separate edits: new_section / no-section (appends) vs. targeted edits
+  const appends: PendingEdit[] = [];
+  const targeted: Array<PendingEdit & { matchIndex: number }> = [];
+
+  for (const edit of dedupedEdits) {
+    if (edit.action === 'new_section' || !edit.section) {
+      appends.push(edit);
     } else {
-      // Section not found — append at end
-      raw = raw.trimEnd() + '\n\n' + content + '\n';
+      const sectionName = edit.section.replace(/^##\s*/, '');
+      const sectionRegex = new RegExp(`^(##\\s+${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`, 'm');
+      const match = sectionRegex.exec(raw);
+      if (match) {
+        targeted.push({ ...edit, matchIndex: match.index });
+      } else {
+        // Section not found — treat as append
+        appends.push(edit);
+      }
     }
-  } else {
-    // No section — append at end of file
-    raw = raw.trimEnd() + '\n\n' + content + '\n';
+  }
+
+  // Apply targeted edits bottom-to-top so earlier edits don't shift positions
+  targeted.sort((a, b) => b.matchIndex - a.matchIndex);
+
+  for (const edit of targeted) {
+    const sectionName = edit.section.replace(/^##\s*/, '');
+    const sectionRegex = new RegExp(`^(##\\s+${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`, 'm');
+    const match = sectionRegex.exec(raw);
+    if (!match) continue; // Shouldn't happen but safety check
+
+    const insertPos = match.index + match[0].length;
+    const rest = raw.slice(insertPos);
+    const nextH2 = rest.search(/\n##\s+/);
+
+    if (edit.action === 'append') {
+      const insertAt = nextH2 >= 0 ? insertPos + nextH2 : raw.length;
+      raw = raw.slice(0, insertAt).trimEnd() + '\n\n' + edit.content + '\n' + raw.slice(insertAt);
+    } else if (edit.action === 'update') {
+      const endPos = nextH2 >= 0 ? insertPos + nextH2 : raw.length;
+      raw = raw.slice(0, insertPos) + '\n\n' + edit.content + '\n' + raw.slice(endPos);
+    } else if (edit.action === 'conflict') {
+      const insertAt = nextH2 >= 0 ? insertPos + nextH2 : raw.length;
+      raw = raw.slice(0, insertAt).trimEnd() + '\n\n> \u26a0\ufe0f CONFLICT\n> ' + edit.content.replace(/\n/g, '\n> ') + '\n' + raw.slice(insertAt);
+    }
+  }
+
+  // Apply appends (new sections and unmatched) at end
+  for (const edit of appends) {
+    if (edit.action === 'new_section') {
+      raw = raw.trimEnd() + `\n\n## ${edit.section}\n\n${edit.content}\n`;
+    } else {
+      raw = raw.trimEnd() + '\n\n' + edit.content + '\n';
+    }
   }
 
   fs.writeFileSync(filePath, raw);
 }
 
+/** Legacy single-edit wrapper — delegates to batched version */
+function applyMatchToFile(filePath: string, section: string, action: string, content: string) {
+  applyEditsToFile(filePath, [{ section, action, content }]);
+}
+
 function gitCommit(files: string[], message: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const quoted = files.map(f => `"${f}"`).join(' ');
-    exec(`cd "${KB_DIR}/.." && git add ${quoted} && git commit -m "${message.replace(/"/g, '\\"')}"`, (err) => {
+    exec(`cd "${KB_DIR}" && git add ${quoted} && git commit -m "${message.replace(/"/g, '\\"')}"`, (err) => {
       if (err) { console.error('[intake] git commit failed:', err.message); reject(err); }
-      else resolve();
+      else { console.log('[intake] git commit OK:', message); resolve(); }
     });
   });
 }
@@ -450,6 +777,7 @@ function parseAiJson(text: string): any {
 function intakeApiPlugin(): Plugin {
   let apiKeys: Record<string, string> = {};
   let masterIndex: ReturnType<typeof buildMasterIndex>;
+  let registry: RegistryEntry[] = [];
 
   return {
     name: 'intake-api',
@@ -462,8 +790,28 @@ function intakeApiPlugin(): Plugin {
         grok: env.GROK_API_KEY || '',
       };
       masterIndex = buildMasterIndex();
+      registry = loadRegistry();
+      console.log(`[Chat] Loaded ${registry.length} registry entries, ${masterIndex.files.length} KB files, ${Object.keys(masterIndex.knownPeople).length} people`);
     },
     configureServer(server) {
+      // Track ingest subprocess state
+      let lastIngestStatus: { status: 'idle' | 'running' | 'success' | 'failed'; startedAt?: string; completedAt?: string; error?: string } = { status: 'idle' };
+
+      // Track active background processing sessions
+      const activeProcessing = new Set<string>();
+
+      // On server start, mark any stale processing sessions as errored
+      const sessions = readArchive();
+      let startupDirty = false;
+      for (const s of sessions) {
+        if (s.status === 'processing') {
+          s.status = 'error';
+          s.error = 'Server restarted — processing was interrupted. Try rerunning.';
+          startupDirty = true;
+        }
+      }
+      if (startupDirty) writeArchive(sessions);
+
       // GET /api/intake/providers
       server.middlewares.use('/api/intake/providers', (_req, res) => {
         const available = Object.entries(providerConfigs)
@@ -471,6 +819,268 @@ function intakeApiPlugin(): Plugin {
           .map(([id, cfg]) => ({ id, name: cfg.name, defaultModel: cfg.defaultModel, variants: cfg.variants }));
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify(available));
+      });
+
+      // GET /api/rag/status — RAG health check endpoint
+      server.middlewares.use('/api/rag/status', async (_req, res) => {
+        try {
+          const localChunks = chunkKnowledgeBase();
+          const db = getAdminDb();
+
+          if (!db) {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({
+              healthy: false,
+              error: 'Firebase Admin not initialized — check GCloud ADC credentials',
+              localKB: { totalChunks: localChunks.length },
+              firestore: { total: 0, text: 0, images: 0, withEmbedding: 0, withoutEmbedding: 0 },
+              sync: { missing: localChunks.length, orphaned: 0, coverage: 0 },
+              ingest: lastIngestStatus,
+            }));
+            return;
+          }
+
+          const snapshot = await db.collection('companies/dtgo/kbChunks').select('contentHash', 'embedding', 'type').get();
+
+          let withEmbedding = 0;
+          let withoutEmbedding = 0;
+          let textChunks = 0;
+          let imageChunks = 0;
+
+          for (const doc of snapshot.docs) {
+            const data = doc.data();
+            if (data.type === 'image') imageChunks++;
+            else textChunks++;
+            if (data.embedding && typeof data.embedding === 'object') withEmbedding++;
+            else withoutEmbedding++;
+          }
+
+          const firestoreIds = new Set(snapshot.docs.map(d => d.id));
+          const localIds = new Set(localChunks.map(c => c.id));
+          const missing = localChunks.filter(c => !firestoreIds.has(c.id)).length;
+          const orphaned = snapshot.docs.filter(d => d.data().type !== 'image' && !localIds.has(d.id)).length;
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            healthy: missing === 0 && withoutEmbedding === 0 && orphaned === 0,
+            firestore: { total: snapshot.size, text: textChunks, images: imageChunks, withEmbedding, withoutEmbedding },
+            localKB: { totalChunks: localChunks.length },
+            sync: { missing, orphaned, coverage: localChunks.length > 0 ? Math.round((1 - missing / localChunks.length) * 100) : 100 },
+            ingest: lastIngestStatus,
+          }));
+        } catch (err) {
+          console.error('[rag/status] Error:', err);
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }));
+        }
+      });
+
+      // ── Chat API endpoints ──
+
+      // GET /api/chat/sessions — list all chat sessions (summary, no messages)
+      // GET /api/chat/session/:id — full session with messages
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+
+        if (req.url === '/api/chat/sessions') {
+          const sessions = readChatArchive();
+          const summaries = sessions.map(s => ({
+            id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt,
+            provider: s.provider, model: s.model, messageCount: s.messages.length,
+          }));
+          summaries.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(summaries));
+          return;
+        }
+
+        const sessionMatch = req.url?.match(/^\/api\/chat\/session\/([a-f0-9-]+)$/);
+        if (sessionMatch) {
+          const sessions = readChatArchive();
+          const session = sessions.find(s => s.id === sessionMatch[1]);
+          res.setHeader('Content-Type', 'application/json');
+          if (session) { res.end(JSON.stringify(session)); }
+          else { res.statusCode = 404; res.end(JSON.stringify({ error: 'Session not found' })); }
+          return;
+        }
+
+        next();
+      });
+
+      // POST /api/chat/session — create new session
+      // PUT  /api/chat/session/:id — update session messages
+      // DELETE /api/chat/session/:id — delete session
+      server.middlewares.use(async (req, res, next) => {
+        const sessionMatch = req.url?.match(/^\/api\/chat\/session(?:\/([a-f0-9-]+))?$/);
+        if (!sessionMatch) return next();
+
+        if (req.method === 'POST' && !sessionMatch[1]) {
+          const body = await readBody(req);
+          const session: ChatSession = {
+            id: crypto.randomUUID(),
+            title: 'New Chat',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            provider: body.provider || 'claude',
+            model: body.model || 'claude-sonnet-4-6',
+            messages: [],
+          };
+          const sessions = readChatArchive();
+          sessions.unshift(session);
+          writeChatArchive(sessions);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ id: session.id }));
+          return;
+        }
+
+        if (req.method === 'PUT' && sessionMatch[1]) {
+          const body = await readBody(req);
+          const sessions = readChatArchive();
+          const idx = sessions.findIndex(s => s.id === sessionMatch[1]);
+          if (idx < 0) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Session not found' }));
+            return;
+          }
+          if (body.messages) sessions[idx].messages = body.messages;
+          if (body.title) sessions[idx].title = body.title;
+          if (body.provider) sessions[idx].provider = body.provider;
+          if (body.model) sessions[idx].model = body.model;
+          sessions[idx].updatedAt = new Date().toISOString();
+          writeChatArchive(sessions);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        if (req.method === 'DELETE' && sessionMatch[1]) {
+          const sessions = readChatArchive();
+          const filtered = sessions.filter(s => s.id !== sessionMatch[1]);
+          writeChatArchive(filtered);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        next();
+      });
+
+      // POST /api/chat/stream — SSE streaming chat with RAG
+      server.middlewares.use(async (req, res, next) => {
+        if (req.method !== 'POST' || req.url !== '/api/chat/stream') return next();
+
+        let body: any;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'Invalid request body' }));
+          return;
+        }
+
+        const messages: ChatMessage[] = body.messages || [];
+        const provider: string = body.provider || 'claude';
+        const model: string = body.model || '';
+
+        if (messages.length === 0 || !messages.some(m => m.role === 'user')) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'At least one user message is required' }));
+          return;
+        }
+
+        const key = apiKeys[provider];
+        if (!key) { res.statusCode = 400; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: `No API key for provider: ${provider}` })); return; }
+
+        // Extract last user message for KB retrieval
+        const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+        let kbContext = '';
+        let retrievalMethod = 'none';
+
+        if (lastUserMsg) {
+          // Tier 1: Vector search (RAG) via Firestore
+          if (apiKeys.gemini) {
+            try {
+              const chunks = await findRelevantChunks(lastUserMsg.content, apiKeys.gemini, 8);
+              if (chunks && chunks.length > 0) {
+                kbContext = formatChunksAsContext(chunks);
+                retrievalMethod = 'rag';
+                console.log(`[Chat] RAG: ${chunks.length} chunks retrieved for "${lastUserMsg.content.slice(0, 60)}"`);
+              }
+            } catch (err) {
+              console.warn('[Chat] RAG failed:', (err as Error).message, '— falling back to local search');
+            }
+          }
+
+          // Tier 2: Local KB keyword search fallback
+          if (!kbContext) {
+            const localResult = localKbSearch(lastUserMsg.content, masterIndex, registry);
+            if (localResult) {
+              kbContext = localResult;
+              retrievalMethod = 'local';
+              console.log(`[Chat] Local KB: found context for "${lastUserMsg.content.slice(0, 60)}"`);
+            } else {
+              console.warn(`[Chat] WARNING: No KB context for "${lastUserMsg.content.slice(0, 80)}"`);
+            }
+          }
+        }
+
+        const systemPrompt = kbContext
+          ? `You are a knowledgeable assistant for the DTGO Corporation knowledge base.\n\nRULES:\n- ONLY state facts that appear in the KNOWLEDGE BASE CONTEXT below. Do not editorialize, speculate, or add filler commentary.\n- If the context doesn't contain information to answer the question, say so plainly. Do not fabricate details.\n- Never generate generic corporate praise like "meaningful step forward" or "exciting development." If the KB doesn't say it, you don't say it.\n- Quote or closely paraphrase the source material. Cite which file/section the information comes from when possible.\n- Never tell users to "contact DTGO" or suggest they reach out elsewhere — you ARE the DTGO knowledge base.\n- Keep answers direct and factual.\n\nKNOWLEDGE BASE CONTEXT:\n${kbContext}`
+          : 'You are a knowledgeable assistant for the DTGO Corporation knowledge base. The knowledge base retrieval is temporarily limited. RULES: Only state what you actually know to be true. Do not fabricate details or add generic corporate commentary. Never tell users to "contact DTGO" or suggest they reach out elsewhere — you ARE the DTGO knowledge base. If you cannot find specific information, say plainly that the knowledge base lookup failed and suggest they rephrase or try again.';
+
+        const streamReq = buildStreamRequest(provider, key, model, systemPrompt, messages);
+        if (!streamReq) { res.statusCode = 400; res.end(JSON.stringify({ error: `Unsupported provider: ${provider}` })); return; }
+
+        // Set SSE headers
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        // Send retrieval metadata before streaming begins
+        res.write(`data: ${JSON.stringify({ meta: { retrieval: retrievalMethod } })}\n\n`);
+
+        try {
+          const apiRes = await fetch(streamReq.url, streamReq.init);
+          if (!apiRes.ok) {
+            const errText = await apiRes.text();
+            res.write(`data: ${JSON.stringify({ error: `Provider error ${apiRes.status}: ${errText.slice(0, 200)}` })}\n\n`);
+            res.end();
+            return;
+          }
+
+          const reader = apiRes.body!.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop()!;
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const dataStr = line.slice(6).trim();
+                if (dataStr === '[DONE]') break;
+                const token = parseStreamChunk(provider, dataStr);
+                if (token) res.write(`data: ${JSON.stringify({ content: token })}\n\n`);
+              }
+            }
+          }
+
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } catch (err) {
+          console.error('[Chat] Streaming error:', err);
+          try { res.write(`data: ${JSON.stringify({ error: (err as Error).message })}\n\n`); } catch {}
+          res.end();
+        }
       });
 
       // GET /api/intake/sessions (list) and GET /api/intake/session/:id (single)
@@ -497,7 +1107,8 @@ function intakeApiPlugin(): Plugin {
             status: s.status, sourceExcerpt: s.sourceExcerpt, error: s.error,
             matchCount: s.result?.matches?.length || 0,
             conflictCount: s.result?.conflicts?.length || 0,
-            approvals: s.approvals, appliedAt: s.appliedAt,
+            approvals: s.approvals, appliedAt: s.appliedAt, resolvedAt: s.resolvedAt,
+            rejectionReasons: s.rejectionReasons,
             attachmentNames: s.attachments?.map(a => a.filename) || [],
           }));
           res.setHeader('Content-Type', 'application/json');
@@ -532,7 +1143,7 @@ function intakeApiPlugin(): Plugin {
         if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
         try {
         const body = await readBody(req);
-        const { sessionId, approvals, contentEdits = {} } = body;
+        const { sessionId, approvals, contentEdits = {}, rejectionReasons = {} } = body;
         const sessions = readArchive();
         const session = sessions.find(s => s.id === sessionId);
         if (!session || !session.result) { res.statusCode = 404; res.end('Session not found'); return; }
@@ -540,6 +1151,7 @@ function intakeApiPlugin(): Plugin {
 
         const validationResults: { index: number; valid: boolean; issues: string[]; applied: boolean }[] = [];
         const affectedFiles: string[] = [];
+        const pendingFileEdits = new Map<string, PendingEdit[]>();
         const haiku = apiKeys.claude; // Use Haiku for validation
 
         for (const [indexStr, decision] of Object.entries(approvals)) {
@@ -634,12 +1246,16 @@ ${match.content}
 SCHEMA RULES:
 - Person entries MUST use: ### Name — Role, Org\\n\\n\`Tag\` · \`Org\`\\n\\nNarrative prose paragraphs\\n\\n**Sources:** citation
 - NEVER bullet-point lists for person entries — convert to prose if found
-- Check if this person/entity already exists in the section (DUPLICATE check)
+- Check if this person/entity already exists in the EXISTING SECTION CONTENT above (DUPLICATE check)
 
-IMPORTANT: You MUST always return fixedContent. If there are format issues, rewrite the content to comply with schema rules. Never return null for fixedContent — always provide a corrected version. Preserve ALL factual information from the original — never discard data, only reformat it. Issues should be informational warnings, not rejection reasons.
+CONSTRAINTS — DO NOT VIOLATE:
+- Do NOT create new ### person entries from names that only appear in **Sources:** lines. Source attributions are citations, not entity data.
+- Do NOT add new headings, sections, or entries that are not already in the PROPOSED ADDITION. Your job is to reformat what exists, not expand it.
+- The fixedContent MUST have the same number of ### entries as the PROPOSED ADDITION. If the proposed addition has zero ### entries, the fixedContent must also have zero.
+- If the proposed addition is a duplicate of content already in the EXISTING SECTION, set valid to false and do not provide fixedContent.
 
 Return ONLY valid JSON:
-{ "valid": true/false, "issues": ["list of warnings"], "fixedContent": "corrected content — ALWAYS provide this, even if only minor changes needed" }`;
+{ "valid": true/false, "issues": ["list of warnings"], "fixedContent": "corrected content or null if duplicate" }`;
 
               const valRes = await fetch('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
@@ -657,10 +1273,17 @@ Return ONLY valid JSON:
                     contentToApply = valJson.fixedContent;
                     validationResults.push({ index: idx, valid: true, issues: valJson.issues || [], applied: true });
                   } else {
-                    // No fixedContent — apply original anyway, issues are warnings not rejections
-                    validationResults.push({ index: idx, valid: true, issues: valJson.issues || [], applied: true });
+                    // Invalid with no fix — SKIP this match
+                    validationResults.push({
+                      index: idx, valid: false,
+                      issues: [...(valJson.issues || []), 'Validation failed with no fixedContent — skipped'],
+                      applied: false
+                    });
+                    continue;
                   }
                 } else {
+                  // Valid — use fixedContent if provided (may have minor formatting fixes)
+                  if (valJson.fixedContent) contentToApply = valJson.fixedContent;
                   validationResults.push({ index: idx, valid: true, issues: [], applied: true });
                 }
               } else {
@@ -675,6 +1298,22 @@ Return ONLY valid JSON:
             validationResults.push({ index: idx, valid: true, issues: ['No validation key'], applied: true });
           }
 
+          // Hard duplicate check: skip if this person/entity heading already exists in file
+          const h3Match = contentToApply.match(/^###\s+(.+?)(?:\s*—|$)/m);
+          if (h3Match && match.action === 'append') {
+            const personName = h3Match[1].trim();
+            const escapedName = personName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const fileContent = fs.readFileSync(filePath, 'utf-8');
+            if (new RegExp(`^###\\s+${escapedName}`, 'm').test(fileContent)) {
+              validationResults.push({
+                index: idx, valid: false,
+                issues: [`SKIPPED: "${personName}" already exists in ${path.basename(filePath)}`],
+                applied: false
+              });
+              continue;
+            }
+          }
+
           // Append intake source reference to content
           const sessionTag = `[intake:${session.id.slice(0, 8)}]`;
           if (contentToApply.includes('**Sources:**') && !contentToApply.includes(sessionTag)) {
@@ -683,31 +1322,66 @@ Return ONLY valid JSON:
             contentToApply = contentToApply.trimEnd() + `\n\n**Sources:** intake ${sessionTag}`;
           }
 
-          applyMatchToFile(filePath, match.section, match.action, contentToApply);
+          // Collect standard edits for batched per-file application
+          if (!pendingFileEdits.has(filePath)) pendingFileEdits.set(filePath, []);
+          pendingFileEdits.get(filePath)!.push({ section: match.section, action: match.action, content: contentToApply });
           affectedFiles.push(filePath);
         }
 
-        // Update session — only mark as applied if files were actually written
+        // Apply batched edits: one read-write cycle per file, bottom-to-top ordering
+        for (const [filePath, edits] of pendingFileEdits) {
+          applyEditsToFile(filePath, edits);
+        }
+
+        // Update session approvals and rejection reasons
         session.approvals = approvals;
-        if (affectedFiles.length > 0) {
+        if (Object.keys(rejectionReasons).length > 0) {
+          session.rejectionReasons = { ...(session.rejectionReasons || {}), ...rejectionReasons };
+        }
+
+        // Only set appliedAt if at least one item was approved
+        const hasApproved = Object.values(approvals).some(v => v === 'approved');
+        if (hasApproved) {
           session.appliedAt = new Date().toISOString();
         }
+
+        // Check if fully resolved (every match decided as approved or dismissed)
+        const matchCount = session.result?.matches?.length || 0;
+        const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => String(i))
+          .every(idx => approvals[idx] === 'approved' || approvals[idx] === 'dismissed');
+        if (allResolved) {
+          session.resolvedAt = new Date().toISOString();
+        }
+
         writeArchive(sessions);
 
         // Git commit
         if (affectedFiles.length > 0) {
           try {
             await gitCommit(affectedFiles, `intake: ${session.result.summary || 'applied approved changes'}`);
-          } catch { /* git commit failure is non-fatal */ }
+          } catch (gitErr) {
+            console.error('[intake] git commit failed — changes applied but NOT committed:', gitErr);
+            validationResults.push({
+              index: -1, valid: true,
+              issues: ['WARNING: Changes applied but git commit failed — no audit trail for this write'],
+              applied: true
+            });
+          }
         }
 
         // Rebuild master index
         masterIndex = buildMasterIndex();
 
-        // Auto-ingest: update vector store in background
+        // Auto-ingest: update vector store in background (tracked)
+        lastIngestStatus = { status: 'running', startedAt: new Date().toISOString() };
         exec('npm run ingest', { cwd: __dirname }, (err) => {
-          if (err) console.warn('[intake] Auto-ingest failed:', err.message);
-          else console.log('[intake] Auto-ingest complete — vector store updated');
+          if (err) {
+            console.warn('[intake] Auto-ingest failed:', err.message);
+            lastIngestStatus = { status: 'failed', startedAt: lastIngestStatus.startedAt, completedAt: new Date().toISOString(), error: err.message };
+          } else {
+            console.log('[intake] Auto-ingest complete — vector store updated');
+            lastIngestStatus = { status: 'success', startedAt: lastIngestStatus.startedAt, completedAt: new Date().toISOString() };
+          }
         });
 
         const applied = validationResults.filter(v => v.applied).length;
@@ -717,6 +1391,134 @@ Return ONLY valid JSON:
         } catch (err: unknown) {
           console.error('[intake/apply] Unhandled error:', err);
           if (!res.headersSent) { res.statusCode = 500; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ applied: 0, skipped: 0, validationResults: [], error: err instanceof Error ? err.message : 'Unknown error' })); }
+        }
+      });
+
+      // POST /api/intake/dismiss — dismiss rejected items
+      server.middlewares.use('/api/intake/dismiss', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+        try {
+          const body = await readBody(req);
+          const { sessionId, dismissals = [], rejectionReasons = {} } = body;
+          const sessions = readArchive();
+          const session = sessions.find(s => s.id === sessionId);
+          if (!session) { res.statusCode = 404; res.end('Session not found'); return; }
+
+          // Mark specified indices as dismissed
+          for (const idx of dismissals) {
+            const key = String(idx);
+            if (session.approvals[key] === 'rejected') {
+              session.approvals[key] = 'dismissed';
+            }
+          }
+
+          // Store rejection reasons if provided
+          if (Object.keys(rejectionReasons).length > 0) {
+            session.rejectionReasons = { ...(session.rejectionReasons || {}), ...rejectionReasons };
+          }
+
+          // Check if fully resolved
+          const matchCount = session.result?.matches?.length || 0;
+          const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => String(i))
+            .every(idx => session.approvals[idx] === 'approved' || session.approvals[idx] === 'dismissed');
+          if (allResolved) {
+            session.resolvedAt = new Date().toISOString();
+          }
+
+          writeArchive(sessions);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ dismissed: dismissals.length, resolvedAt: session.resolvedAt || null }));
+        } catch (err: unknown) {
+          console.error('[intake/dismiss] Error:', err);
+          if (!res.headersSent) { res.statusCode = 500; res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' })); }
+        }
+      });
+
+      // POST /api/intake/reeval-match — AI re-evaluation of a single match against current KB
+      server.middlewares.use('/api/intake/reeval-match', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+        try {
+          const body = await readBody(req);
+          const { sessionId, matchIndex } = body;
+          const sessions = readArchive();
+          const session = sessions.find(s => s.id === sessionId);
+          if (!session?.result) { res.statusCode = 404; res.end('Session not found'); return; }
+
+          const match = session.result.matches[matchIndex];
+          if (!match) { res.statusCode = 400; res.end('Invalid match index'); return; }
+
+          const haiku = apiKeys.claude;
+          if (!haiku) { res.statusCode = 500; res.end('Claude API key not set'); return; }
+
+          // Read target file + section from KB
+          const fileSlug = (match.file || '').replace(/\.md$/, '').replace(/(^|\/)_/g, '$1');
+          let filePath = path.join(KB_DIR, `${fileSlug}.md`);
+          let fileContent = '';
+          if (fs.existsSync(filePath)) {
+            fileContent = fs.readFileSync(filePath, 'utf-8');
+          } else {
+            const alt = path.join(KB_DIR, `_${fileSlug}.md`);
+            if (fs.existsSync(alt)) fileContent = fs.readFileSync(alt, 'utf-8');
+            else {
+              const dirIndex = path.join(KB_DIR, fileSlug, '_index.md');
+              if (fs.existsSync(dirIndex)) fileContent = fs.readFileSync(dirIndex, 'utf-8');
+            }
+          }
+
+          let sectionContent = '';
+          if (match.section && fileContent) {
+            const sectionName = match.section.replace(/^##\s*/, '');
+            const sectionRegex = new RegExp(`^##\\s+${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm');
+            const sMatch = sectionRegex.exec(fileContent);
+            if (sMatch) {
+              const rest = fileContent.slice(sMatch.index);
+              const nextH2 = rest.indexOf('\n## ', 1);
+              sectionContent = nextH2 >= 0 ? rest.slice(0, nextH2) : rest;
+            }
+          }
+
+          const reevalPrompt = `You are evaluating whether a proposed content change should be applied to a knowledge base file.
+
+TARGET FILE: ${match.file}
+TARGET SECTION: ${match.section || '(top-level)'}
+PROPOSED ACTION: ${match.action}
+
+PROPOSED CONTENT TO ADD/UPDATE:
+${match.content}
+
+CURRENT FILE CONTENT:
+${fileContent || '(file not found)'}
+
+${sectionContent ? `CURRENT SECTION CONTENT:\n${sectionContent}` : ''}
+
+Evaluate this proposed change:
+1. Is this content already present in the file (duplicate)?
+2. Is this content relevant to this file/section?
+3. Is the content accurate and well-written?
+4. Would applying this improve the knowledge base?
+
+Respond with ONLY valid JSON (no markdown fences):
+{
+  "recommendation": "approve" or "reject",
+  "reason": "one-sentence explanation",
+  "duplicateOf": "section name if duplicate, otherwise null",
+  "confidence": "high" or "medium" or "low"
+}`;
+
+          const { url, init } = providerConfigs.claude.buildRequest(haiku, 'claude-haiku-4-5', reevalPrompt, 'Evaluate this proposed KB change.');
+          const apiRes = await fetch(url, init);
+          if (!apiRes.ok) { res.statusCode = apiRes.status; res.end(`AI eval failed: ${await apiRes.text()}`); return; }
+
+          const apiData = await apiRes.json();
+          const text = providerConfigs.claude.extractText(apiData);
+          let result;
+          try { result = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim()); } catch { result = { recommendation: 'approve', reason: 'Could not parse AI response', confidence: 'low' }; }
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(result));
+        } catch (err: unknown) {
+          console.error('[intake/reeval-match] Error:', err);
+          if (!res.headersSent) { res.statusCode = 500; res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' })); }
         }
       });
 
@@ -848,8 +1650,8 @@ Return ONLY valid JSON, no markdown fences.`;
 
           // Gather RAG context
           const query = `${cleanHeading} ${correctionNote}`;
-          const chunks = await findRelevantChunks(query, 8);
-          const ragContext = formatChunksAsContext(chunks);
+          const chunks = await findRelevantChunks(query, apiKeys.gemini, 8);
+          const ragContext = chunks ? formatChunksAsContext(chunks) : '';
 
           // Build prompt and call Claude
           const systemPrompt = `You are a knowledge base editor. The user has flagged an inaccuracy in a section.
@@ -1072,11 +1874,8 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
 
         (async () => {
           try {
-            const { getApps: getAdminApps } = await import('firebase-admin/app');
-            const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
-            const adminApp = getAdminApps()[0];
-            if (!adminApp) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
-            const adminDb = getAdminFirestore(adminApp);
+            const adminDb = getAdminDb();
+            if (!adminDb) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
             const docs = await listAttachments(adminDb, division);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(docs));
@@ -1095,12 +1894,11 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
 
         (async () => {
           try {
+            const adminDb = getAdminDb();
+            if (!adminDb) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
             const { getApps: getAdminApps } = await import('firebase-admin/app');
-            const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
             const { getStorage: getAdminStorage } = await import('firebase-admin/storage');
             const adminApp = getAdminApps()[0];
-            if (!adminApp) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
-            const adminDb = getAdminFirestore(adminApp);
             const doc = await adminDb.collection('companies/dtgo/attachments').doc(match[1]).get();
             if (!doc.exists) { res.statusCode = 404; res.end('Attachment not found'); return; }
             const data = doc.data()!;
@@ -1147,6 +1945,24 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
 
         if (!cfg) { res.statusCode = 400; res.end(`Unknown provider: ${provider}`); return; }
         if (!key) { res.statusCode = 500; res.end(`${cfg.name} API key not set`); return; }
+
+        // Check for existing sessions with same source text
+        const existingSessions = readArchive();
+        const sourceFingerprint = text.trim().slice(0, 500);
+        const existingMatch = existingSessions.find(s =>
+          s.sourceText?.trim().slice(0, 500) === sourceFingerprint &&
+          (s.status === 'ready' || s.status === 'processing')
+        );
+        if (existingMatch) {
+          res.setHeader('Content-Type', 'application/json');
+          res.statusCode = 409;
+          res.end(JSON.stringify({
+            error: 'duplicate_source',
+            message: `Already processed in session ${existingMatch.id.slice(0, 8)} (${existingMatch.status}).`,
+            existingSessionId: existingMatch.id,
+          }));
+          return;
+        }
 
         // Create session and return ID immediately
         const sessionId = crypto.randomUUID();
@@ -1308,7 +2124,7 @@ Example:
 
 \`Appointed May 2025\` · \`Cloud 11\`
 
-New-generation leader with experience spanning entertainment, marketing, and real estate. Career includes an **executive role at Universal Music Group** and the **founding of Def Jam Thailand**.
+New-generation leader with experience spanning entertainment, marketing, and real estate. Career includes an executive role at **Universal Music Group** and the founding of **Def Jam Thailand**.
 
 Officially assumed CEO role on May 20, 2025. Works alongside Project Director Onza Janyaprasert to drive development and engage content creators, media companies, and global partners.
 
@@ -1325,6 +2141,9 @@ Narrative paragraph(s) describing the entity, project, or initiative. Include ke
 \`\`\`
 
 NEVER use bullet-point lists for person entries. Always use narrative prose with backtick role tags on the second line. Match the exact heading format: ### Name — Role, Organization
+
+BOLD FORMATTING RULE:
+**text** is ONLY for person names and entity/project names. These render as clickable links in the wiki UI. NEVER bold descriptive labels, field names, emphasis phrases, or section headers. Use ## or ### headings for section structure. The only non-name bold allowed is **Sources:** as a structural label.
 
 SOURCE TAGGING:
 Every **Sources:** line you generate MUST end with [intake:${sessionId.slice(0, 8)}] — this links the content back to this intake session for traceability.

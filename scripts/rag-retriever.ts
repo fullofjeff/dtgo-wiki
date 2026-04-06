@@ -32,7 +32,7 @@ let adminApp: App | null = null;
 let adminDb: Firestore | null = null;
 
 /** Initialize Firebase Admin (lazy, idempotent) — uses ADC or GOOGLE_APPLICATION_CREDENTIALS */
-function getAdminDb(): Firestore | null {
+export function getAdminDb(): Firestore | null {
   if (adminDb) return adminDb;
 
   try {

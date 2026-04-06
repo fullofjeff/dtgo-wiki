@@ -33,7 +33,7 @@ export function Dropdown({
 
     useClickOutside({ ref: dropdownRef, onClickOutside: onClose, enabled: isOpen });
 
-    if (!isOpen) return null;
+    if (!isOpen || !position.ready) return null;
 
     return createPortal(
         <div
@@ -51,7 +51,7 @@ export function Dropdown({
                 width,
                 maxHeight: position.maxHeight,
                 transformOrigin: position.transformOrigin,
-                zIndex: 10001,
+                zIndex: 99999,
                 padding: '12px',
                 backgroundColor: 'rgba(20,20,20,0.98)',
                 border: '1px solid rgba(255,255,255,0.2)',

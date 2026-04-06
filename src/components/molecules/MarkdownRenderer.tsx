@@ -51,18 +51,78 @@ function extractSection(md: string, heading: string, level: number): string {
 }
 
 /** H1 sections whose h2 children should render as collapsible FormSections */
-const FORM_SECTION_PARENTS = new Set(['IP Portfolio', 'Subsidiaries & Internal Units']);
+const FORM_SECTION_PARENTS = new Set([
+  'IP Portfolio',
+  'Subsidiaries & Internal Units',
+  'Residential Brands',
+  'The Forestias',
+]);
+
+/** H2 FormSections whose h3 children should render as nested collapsible FormSections */
+const NESTED_FORM_SECTIONS = new Set([
+  'Residential Brands',
+  'Hapitat',
+]);
 
 type ContentSegment =
   | { type: 'markdown'; content: string }
   | { type: 'formSection'; title: string; description: string; body: string };
 
+/** Split a FormSection body into sub-segments, extracting H3s as nested FormSections */
+function splitH3Segments(body: string): ContentSegment[] {
+  const lines = body.split('\n');
+  const segments: ContentSegment[] = [];
+  let currentLines: string[] = [];
+
+  let i = 0;
+  while (i < lines.length) {
+    const h3Match = lines[i].match(/^###\s+(.+)$/);
+    if (h3Match) {
+      if (currentLines.length > 0) {
+        const content = currentLines.join('\n').trim();
+        if (content) segments.push({ type: 'markdown', content });
+        currentLines = [];
+      }
+
+      const title = h3Match[1].trim();
+      const sectionBody = extractSection(body, title, 3);
+
+      const bodyLines = sectionBody.split('\n');
+      let description = '';
+      let bodyContent = sectionBody;
+      if (bodyLines[0] && /^`[^`]+`/.test(bodyLines[0])) {
+        description = bodyLines[0].replace(/`/g, '').trim();
+        bodyContent = bodyLines.slice(2).join('\n').trim();
+      }
+
+      segments.push({ type: 'formSection', title, description, body: bodyContent });
+
+      i++;
+      while (i < lines.length) {
+        const nextH = lines[i].match(/^(#{1,3})\s/);
+        if (nextH && nextH[1].length <= 3) break;
+        i++;
+      }
+    } else {
+      currentLines.push(lines[i]);
+      i++;
+    }
+  }
+
+  if (currentLines.length > 0) {
+    const content = currentLines.join('\n').trim();
+    if (content) segments.push({ type: 'markdown', content });
+  }
+
+  return segments;
+}
+
 /** Split markdown into renderable segments, extracting FormSection blocks */
-function splitIntoSegments(md: string): ContentSegment[] {
+function splitIntoSegments(md: string, initialH1 = ''): ContentSegment[] {
   const lines = md.split('\n');
   const segments: ContentSegment[] = [];
   let currentLines: string[] = [];
-  let currentH1 = '';
+  let currentH1 = initialH1;
 
   let i = 0;
   while (i < lines.length) {
@@ -120,11 +180,12 @@ function splitIntoSegments(md: string): ContentSegment[] {
 }
 
 
-export function MarkdownRenderer({ content, fileSlug }: { content: string; fileSlug?: string }) {
+export function MarkdownRenderer({ content, fileSlug, parentH1 }: { content: string; fileSlug?: string; parentH1?: string }) {
   const [sectionModal, setSectionModal] = useState<{ title: string; body: string } | null>(null);
   const [personModal, setPersonModal] = useState<PersonRecord | null>(null);
   const [entityModal, setEntityModal] = useState<EntityRecord | null>(null);
   const [sourceModalPrefix, setSourceModalPrefix] = useState<string | null>(null);
+  const [openNested, setOpenBrands] = useState<Set<string>>(new Set());
   const personNameSet = useMemo(() => new Set(getPersonNames()), []);
   const entityNameSet = useMemo(() => new Set(getEntityNames()), []);
 
@@ -136,7 +197,7 @@ export function MarkdownRenderer({ content, fileSlug }: { content: string; fileS
     return map;
   }, []);
 
-  const segments = useMemo(() => splitIntoSegments(content), [content]);
+  const segments = useMemo(() => splitIntoSegments(content, parentH1), [content, parentH1]);
 
   // Single delegated click handler — no onClick on individual elements
   const handleProseClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -257,6 +318,77 @@ export function MarkdownRenderer({ content, fileSlug }: { content: string; fileS
       <div onClick={handleProseClick}>
         {segments.map((seg, i) => {
           if (seg.type === 'formSection') {
+            const nested = NESTED_FORM_SECTIONS.has(seg.title) ? splitH3Segments(seg.body) : null;
+
+            if (nested) {
+              const brandTitles = nested.filter(s => s.type === 'formSection').map(s => (s as { title: string }).title);
+              const brandComponents: Components = {
+                ...components,
+                td: ({ children }) => {
+                  const text = textContent(children);
+                  const match = brandTitles.find(t => text.startsWith(t));
+                  if (match) {
+                    const slug = slugify(match);
+                    return (
+                      <td
+                        style={{ cursor: 'pointer', color: 'var(--jf-lavender)' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenBrands(prev => new Set(prev).add(slug));
+                          setTimeout(() => {
+                            document.getElementById(`nested-${slug}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          }, 50);
+                        }}
+                      >
+                        {children}
+                      </td>
+                    );
+                  }
+                  return <td>{children}</td>;
+                },
+              };
+
+              return (
+                <FormSection key={i} title={seg.title} description={seg.description} onEdit={fileSlug ? () => setSectionModal({ title: seg.title, body: seg.body }) : undefined}>
+                  {nested.map((sub, j) => {
+                    if (sub.type === 'formSection') {
+                      const slug = slugify(sub.title);
+                      return (
+                        <div key={j} id={`nested-${slug}`}>
+                          <FormSection
+                            title={sub.title}
+                            description={sub.description}
+                            open={openNested.has(slug)}
+                            onToggle={(isOpen) => {
+                              setOpenBrands(prev => {
+                                const next = new Set(prev);
+                                if (isOpen) next.add(slug); else next.delete(slug);
+                                return next;
+                              });
+                            }}
+                            onEdit={fileSlug ? () => setSectionModal({ title: sub.title, body: sub.body }) : undefined}
+                          >
+                            <div className="prose">
+                              <ReactMarkdown remarkPlugins={[remarkGfm, [remarkEntityLinks, { names: nameTypeMap }]]} components={components}>
+                                {processedContent(sub.body)}
+                              </ReactMarkdown>
+                            </div>
+                          </FormSection>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div key={j} className="prose">
+                        <ReactMarkdown remarkPlugins={[remarkGfm, [remarkEntityLinks, { names: nameTypeMap }]]} components={components}>
+                          {processedContent(sub.content)}
+                        </ReactMarkdown>
+                      </div>
+                    );
+                  })}
+                </FormSection>
+              );
+            }
+
             return (
               <FormSection key={i} title={seg.title} description={seg.description} onEdit={fileSlug ? () => setSectionModal({ title: seg.title, body: seg.body }) : undefined}>
                 <div className="prose">

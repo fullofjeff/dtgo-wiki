@@ -93,7 +93,7 @@ export function ModelChip({
             <Chip
                 ref={chipRef}
                 label={displayLabel}
-                colorScheme={provider as Provider}
+                color={provider as Provider}
                 onClick={hasDropdown ? () => setIsOpen(!isOpen) : undefined}
                 showDropdownIcon={hasDropdown}
                 isActive={isOpen}

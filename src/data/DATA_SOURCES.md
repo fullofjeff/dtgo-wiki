@@ -34,7 +34,7 @@ When information about DTGO entities is updated, it must be reflected in ALL of 
 | UK Hotel Portfolio | `dtp.md` § UK Hotels | `ukhotels` | DTP sub |
 | REDDS Technology Fund | `dtp.md` § Innovative | `redds` | DTP sub |
 | Mind AI | `dtp.md` § Innovative | `mindai` | DTP sub |
-| The Forestias | `forestias.md` | — | Project, not org unit |
+| The Forestias | `forestias.md` | — | Project, not org unit. H2 sections render as collapsible FormSections (see MarkdownRenderer FORM_SECTION_PARENTS). Sections: Environment & Natural History, Story World, Visual Storytelling, Ecology, Film Characters. Happitat (mall/retail) is a separate H1 scope. |
 | Cloud 11 | `cloud11.md` | — | Project, not org unit |
 | People | `people.md` | `leader` fields | Cross-referenced |
 

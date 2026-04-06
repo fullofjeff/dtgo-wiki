@@ -1,57 +1,85 @@
-import type { ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
+import clsx from 'clsx';
+import {
+    resolveChipStyle,
+    getDotColor,
+    BADGE_SIZE_MAP,
+    type ChipColor,
+    type ChipVariant,
+    type ChipSize,
+} from './chipVariants';
 
 export interface BadgeProps {
-    variant: 'default' | 'selected' | 'info' | 'warning';
     children: ReactNode;
+    color?: ChipColor;
+    variant?: ChipVariant;
+    size?: ChipSize;
+    /** Colored dot indicator. `true` = match color, string = custom hex. */
+    dot?: boolean | string;
+    /** Leading icon (ReactNode). Overridden by `avatar` if both provided. */
+    icon?: ReactNode;
+    /** Leading avatar. String = img src, ReactNode = custom element. */
+    avatar?: string | ReactNode;
+    /** Uppercase text transform. @default true */
+    uppercase?: boolean;
     className?: string;
 }
 
 /**
- * Badge component for status indicators
- * Used for DEFAULT, SELECTED badges in dropdowns
+ * Static display badge for status indicators, labels, and tags.
+ * Used in tables, node headers, dropdowns, and modals.
  */
-const variantStyles = {
-    default: {
-        backgroundColor: 'rgba(216,131,10,0.2)',
-        color: '#d8830a',
-        border: '1px solid rgba(216,131,10,0.3)',
-    },
-    selected: {
-        backgroundColor: 'rgba(100,140,220,0.2)',
-        color: '#7ca0e0',
-        border: '1px solid rgba(100,140,220,0.3)',
-    },
-    info: {
-        backgroundColor: 'rgba(255,255,255,0.05)',
-        color: 'rgba(255,255,255,0.6)',
-        border: '1px solid rgba(255,255,255,0.1)',
-    },
-    warning: {
-        backgroundColor: 'rgba(199,165,93,0.15)',
-        color: 'var(--jf-gold, #c7a55d)',
-        border: '1px solid rgba(199,165,93,0.3)',
-    },
-};
+export const Badge = memo(function Badge({
+    children,
+    color = 'default',
+    variant = 'soft',
+    size = 'sm',
+    dot,
+    icon,
+    avatar,
+    uppercase = true,
+    className,
+}: BadgeProps) {
+    const { classes, vars } = resolveChipStyle(color, variant);
+    const sizeConfig = BADGE_SIZE_MAP[size];
 
-export function Badge({ variant, children, className }: BadgeProps) {
+    // Leading content priority: avatar > icon > dot
+    let leading: ReactNode = null;
+    if (avatar) {
+        leading = typeof avatar === 'string' ? (
+            <img
+                src={avatar}
+                alt=""
+                className={clsx('rounded-full object-cover shrink-0', sizeConfig.avatar)}
+            />
+        ) : (
+            <span className={clsx('shrink-0', sizeConfig.avatar)}>{avatar}</span>
+        );
+    } else if (icon) {
+        leading = <span className={clsx('shrink-0 flex items-center', sizeConfig.icon)}>{icon}</span>;
+    } else if (dot) {
+        const dotColor = typeof dot === 'string' ? dot : getDotColor(color);
+        leading = (
+            <span
+                className={clsx('rounded-full shrink-0', sizeConfig.dot)}
+                style={{ backgroundColor: dotColor }}
+            />
+        );
+    }
+
     return (
         <span
-            className={className}
-            style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                padding: '4px 8px',
-                fontSize: '0.65rem',
-                fontWeight: 600,
-                borderRadius: '4px',
-                textTransform: 'uppercase',
-                letterSpacing: '0.025em',
-                whiteSpace: 'nowrap',
-                flexShrink: 0,
-                ...variantStyles[variant],
-            }}
+            className={clsx(
+                'inline-flex items-center font-semibold border whitespace-nowrap shrink-0 select-none',
+                sizeConfig.container,
+                classes,
+                uppercase && 'uppercase tracking-wide',
+                className,
+            )}
+            style={vars as React.CSSProperties | undefined}
         >
+            {leading}
             {children}
         </span>
     );
-}
+});
