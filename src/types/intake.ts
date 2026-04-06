@@ -12,6 +12,9 @@ export interface IntakeMatch {
   content: string;
   corrections?: IntakeCorrection[];
   isDuplicate?: boolean;
+  appliedAt?: string;
+  applyError?: string;
+  details?: Record<string, any>;
 }
 
 export interface IntakeClarification {

@@ -3,6 +3,7 @@ import { type ColumnDef } from '@tanstack/react-table';
 import { DataTable } from '../ui/DataTable';
 import { Badge } from '../ui/Badge';
 import { FormSection } from '../ui/FormSection';
+import { DashboardCard } from '@/components/ui/DashboardCard';
 import {
   Database, Activity, AlertTriangle, RefreshCw, CheckCircle2,
   XCircle, Clock, Loader2,

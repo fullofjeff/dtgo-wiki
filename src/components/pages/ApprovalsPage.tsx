@@ -25,7 +25,7 @@ export function ApprovalsPage() {
 
   const fetchFullSessions = useCallback(async (sessions: IntakeSession[]) => {
     const results = await Promise.all(
-      sessions.map(s => fetch(`/api/intake/session/${s.id}`).then(r => r.json())),
+      sessions.map(s => fetch(`/api/intake/session/${s.id}`).then(r => r.ok ? r.json() : [])),
     );
     return results as (IntakeSession & { sourceText?: string })[];
   }, []);
@@ -55,16 +55,16 @@ export function ApprovalsPage() {
 
   const refreshSessions = useCallback(() => {
     fetch('/api/intake/sessions')
-      .then(r => r.json())
-      .then((data: IntakeSession[]) => setAllSessions(data))
+      .then(r => r.ok ? r.json() : [])
+      .then((data) => { if (Array.isArray(data)) setAllSessions(data); })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
     fetch('/api/intake/sessions')
-      .then(r => r.json())
-      .then((data: IntakeSession[]) => {
-        setAllSessions(data);
+      .then(r => r.ok ? r.json() : [])
+      .then((data) => {
+        if (Array.isArray(data)) setAllSessions(data);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -76,6 +76,24 @@ export function ApprovalsPage() {
     const t = setTimeout(() => setSuccessMessage(null), 3000);
     return () => clearTimeout(t);
   }, [successMessage]);
+
+  // Sessions currently being processed by AI (initial processing or reprocessing)
+  const processing = useMemo(
+    () => allSessions.filter(s => {
+      const state = getSessionState(s);
+      return state === 'processing' || state === 'reprocessing';
+    }),
+    [allSessions],
+  );
+
+  // Auto-refresh while any session is processing or reprocessing
+  const hasProcessing = processing.length > 0;
+
+  useEffect(() => {
+    if (!hasProcessing) return;
+    const interval = setInterval(refreshSessions, 5000);
+    return () => clearInterval(interval);
+  }, [hasProcessing, refreshSessions]);
 
   const pending = useMemo(
     () => allSessions.filter(s => {
@@ -135,6 +153,8 @@ export function ApprovalsPage() {
   const statusCell = (s: IntakeSession) => {
     const state = getSessionState(s);
     switch (state) {
+      case 'processing': return <Badge color="default" icon={<Loader2 size={11} className="animate-spin" />}>Processing</Badge>;
+      case 'reprocessing': return <Badge color="info" icon={<Loader2 size={11} className="animate-spin" />}>Reprocessing</Badge>;
       case 'applied': return <Badge color="info">Applied</Badge>;
       case 'partially_applied': return <Badge color="warning">Partial</Badge>;
       case 'all_rejected': return <Badge color="error">Rejected</Badge>;
@@ -208,27 +228,32 @@ export function ApprovalsPage() {
       id: 'open',
       header: 'Action',
       meta: { style: { width: '14%', textAlign: 'center', paddingRight: '12px', verticalAlign: 'middle' } },
-      cell: ({ row }) => (
-        <button
-          onClick={() => setReviewSessionId(row.original.id)}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '4px',
-            fontSize: '12px',
-            fontWeight: 500,
-            color: 'var(--jf-lavender)',
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            padding: '4px 8px',
-            borderRadius: '4px',
-          }}
-        >
-          <Eye size={13} />
-          Review
-        </button>
-      ),
+      cell: ({ row }) => {
+        const isReprocessing = getSessionState(row.original) === 'reprocessing';
+        return (
+          <button
+            disabled={isReprocessing}
+            onClick={() => !isReprocessing && setReviewSessionId(row.original.id)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontSize: '12px',
+              fontWeight: 500,
+              color: 'var(--jf-lavender)',
+              background: 'none',
+              border: 'none',
+              cursor: isReprocessing ? 'default' : 'pointer',
+              padding: '4px 8px',
+              borderRadius: '4px',
+              opacity: isReprocessing ? 0.4 : 1,
+            }}
+          >
+            <Eye size={13} />
+            Review
+          </button>
+        );
+      },
     },
   ], [showSourceForSession]);
 
@@ -339,10 +364,31 @@ export function ApprovalsPage() {
         </p>
       </div>
 
+      {/* Processing — sessions being analyzed by AI */}
+      {!loading && processing.length > 0 && (
+        <div style={{ marginBottom: '32px' }}>
+          <div style={{
+            fontSize: '0.65rem',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '1.5px',
+            color: 'var(--text-secondary)',
+            marginBottom: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <Loader2 size={13} className="animate-spin" style={{ color: 'var(--jf-lavender)' }} />
+            Processing ({processing.length})
+          </div>
+          <DataTable data={processing} columns={pendingColumns} hideSearch tableLayout="fixed" />
+        </div>
+      )}
+
       {/* Pending approvals */}
       {loading ? (
         <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Loading...</p>
-      ) : pending.length === 0 ? (
+      ) : pending.length === 0 && processing.length === 0 ? (
         <div style={{
           textAlign: 'center',
           padding: '48px 24px',

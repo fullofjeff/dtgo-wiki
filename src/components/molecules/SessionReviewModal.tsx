@@ -197,7 +197,11 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
   const [matchContextMenu, setMatchContextMenu] = useState<{ x: number; y: number; idx: number } | null>(null);
   const [dismissedItems, setDismissedItems] = useState<Set<number>>(new Set());
 
-  const readOnly = !!session?.appliedAt;
+  // Per-match applied tracking: each match knows if it's been written to disk
+  const isMatchApplied = useCallback((idx: number) => !!result?.matches[idx]?.appliedAt, [result]);
+  const allApplied = useMemo(() => result?.matches?.every(m => m.appliedAt || m.isDuplicate) ?? false, [result]);
+  // Legacy compat: readOnly = true only when every match is applied (no new matches from reprocess)
+  const readOnly = allApplied;
   const hasUndismissedRejections = [...rejectedItems].some(i => !dismissedItems.has(i));
 
   // Fetch session on open
@@ -257,18 +261,22 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
   }, [open, sessionId]);
 
   const handleApprove = (index: number) => {
+    if (isMatchApplied(index)) return; // Already written to disk
     setApprovedItems(prev => { const s = new Set(prev); s.add(index); return s; });
     setRejectedItems(prev => { const s = new Set(prev); s.delete(index); return s; });
   };
 
   const handleReject = (index: number) => {
+    if (isMatchApplied(index)) return;
     setRejectedItems(prev => { const s = new Set(prev); s.add(index); return s; });
     setApprovedItems(prev => { const s = new Set(prev); s.delete(index); return s; });
   };
 
   const handleApproveAll = () => {
     if (!result) return;
-    const all = new Set(result.matches.map((_, i) => i).filter(i => !result.matches[i].isDuplicate));
+    const all = new Set(result.matches.map((_, i) => i).filter(i =>
+      !result.matches[i].isDuplicate && !result.matches[i].appliedAt
+    ));
     setApprovedItems(all);
     setRejectedItems(new Set());
   };
@@ -330,11 +338,14 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
 
   const handleApplyAndRefine = useCallback(async () => {
     if (!sessionId) return;
-    setApplying(true);
+    const willApply = approvedItems.size > 0;
+    const willRefine = hasRefineData;
+    if (willApply) setApplying(true);
+    if (willRefine && !willApply) setReprocessing(true);
     setApplyResult(null);
 
     try {
-      if (approvedItems.size > 0) {
+      if (willApply) {
         const approvals: Record<string, 'approved' | 'rejected' | 'dismissed'> = {};
         approvedItems.forEach(i => { approvals[String(i)] = 'approved'; });
         rejectedItems.forEach(i => { approvals[String(i)] = 'rejected'; });
@@ -371,11 +382,15 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
       }
 
       if (hasRefineData) {
+        // Switch from applying to reprocessing state
+        setApplying(false);
+        setReprocessing(true);
+
         // Build success message based on what happened
         const appliedCount = approvedItems.size;
         const successMsg = appliedCount > 0
-          ? { title: 'Applied & Reprocessing', subtitle: `${appliedCount} change(s) committed. Refining with your answers in background.` }
-          : { title: 'Answers Submitted', subtitle: 'Reprocessing in background. Reopen session to see updated results.' };
+          ? { title: 'Applied & Reprocessing', subtitle: `${appliedCount} change(s) committed. Refining edits in background.` }
+          : { title: 'Reprocessing', subtitle: 'Refining edits in background. Reopen session to see updated results.' };
 
         // Close modal and show success immediately — reprocess runs in background
         onClose();
@@ -414,8 +429,9 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
       setApplyResult(`Error: ${err instanceof Error ? err.message : 'Apply failed'}`);
     } finally {
       setApplying(false);
+      setReprocessing(false);
     }
-  }, [sessionId, approvedItems, rejectedItems, contentEdits, conflictResolutions, hasRefineData, onApplied, onClose, onSuccess]);
+  }, [sessionId, approvedItems, rejectedItems, dismissedItems, contentEdits, conflictResolutions, hasRefineData, onApplied, onClose, onSuccess, rejectionReasons]);
 
   // Table data
   const tableData: TableRow[] = useMemo(() => {
@@ -517,7 +533,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
       header: 'Content',
       cell: ({ row }) => {
         if (row.original._isClarification) {
-          if (readOnly) return <span style={{ fontSize: '12px', color: 'var(--text-secondary)', opacity: 0.4 }}>—</span>;
+          if (isMatchApplied(row.original._index)) return <span style={{ fontSize: '12px', color: 'var(--text-secondary)', opacity: 0.4 }}>—</span>;
           const idx = row.original._index;
           return (
             <ClarificationCell
@@ -529,13 +545,14 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
           );
         }
         const idx = row.original._index;
+        const matchLocked = isMatchApplied(idx);
         const displayContent = contentEdits[idx] ?? row.original.content;
         const isEdited = idx in contentEdits;
         return displayContent ? (
           <div
-            onContextMenu={readOnly ? undefined : (e) => { e.preventDefault(); setEditingIdx(idx); }}
-            title={readOnly ? undefined : 'Right-click to edit'}
-            style={{ position: 'relative', cursor: readOnly ? 'default' : 'context-menu' }}
+            onContextMenu={matchLocked ? undefined : (e) => { e.preventDefault(); setEditingIdx(idx); }}
+            title={matchLocked ? undefined : 'Right-click to edit'}
+            style={{ position: 'relative', cursor: matchLocked ? 'default' : 'context-menu' }}
           >
             {isEdited && (
               <div className="flex items-center gap-1" style={{ marginBottom: '4px' }}>
@@ -567,7 +584,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
         const isClarification = row.original._isClarification;
 
         if (isClarification) {
-          if (readOnly) return <span style={{ fontSize: '12px', color: 'var(--text-secondary)', opacity: 0.4 }}>—</span>;
+          if (isMatchApplied(idx)) return <span style={{ fontSize: '12px', color: 'var(--text-secondary)', opacity: 0.4 }}>—</span>;
           const answer = clarificationAnswersRef.current[idx];
           const answered = answer?.selected || answer?.note;
           return answered ? <Badge color="info">Staged</Badge> : <Badge color="default">?</Badge>;
@@ -579,6 +596,8 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
         const aiRec = aiRecommendations[idx];
         const isEvaluating = reevalLoading.has(idx);
         const reason = rejectionReasons[idx];
+        const matchApplied = isMatchApplied(idx);
+        const bounceError = row.original.applyError;
 
         // AI recommendation badge (shown in all modes)
         const aiRecBadge = isEvaluating ? (
@@ -602,7 +621,31 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
           </div>
         ) : null;
 
-        // Read-only mode (after apply)
+        // Per-match applied state: this match has been written to disk — locked
+        if (matchApplied) {
+          return (
+            <div>
+              <Badge color="info">Applied</Badge>
+              <div style={{ fontSize: '9px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                {new Date(row.original.appliedAt!).toLocaleDateString()}
+              </div>
+            </div>
+          );
+        }
+
+        // Bounced: duplicate/conflict detected during apply — show why
+        if (bounceError) {
+          return (
+            <div>
+              <Badge color="neutral">Bounced</Badge>
+              <div style={{ fontSize: '9px', color: 'var(--dtp-pink)', marginTop: '2px' }} title={bounceError}>
+                {bounceError.length > 40 ? bounceError.slice(0, 40) + '…' : bounceError}
+              </div>
+            </div>
+          );
+        }
+
+        // Read-only mode (all matches applied)
         if (readOnly) {
           if (isApproved) return <Badge color="info">Approved</Badge>;
           if (isDismissed) return (
@@ -631,10 +674,16 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
           return <Badge color="default">—</Badge>;
         }
 
-        if (reprocessing || applying) return (
+        if (applying && approvedItems.has(idx)) return (
+          <div className="flex items-center gap-1">
+            <Loader2 size={14} className="animate-spin" style={{ color: 'var(--dtgo-green)' }} />
+            <span style={{ fontSize: '10px', color: 'var(--dtgo-green)', fontWeight: 600 }}>Applying…</span>
+          </div>
+        );
+        if (reprocessing && idx in contentEdits) return (
           <div className="flex items-center gap-1">
             <Loader2 size={14} className="animate-spin" style={{ color: 'var(--jf-lavender)' }} />
-            <span style={{ fontSize: '10px', color: 'var(--jf-lavender)', fontWeight: 600 }}>Processing</span>
+            <span style={{ fontSize: '10px', color: 'var(--jf-lavender)', fontWeight: 600 }}>Reprocessing…</span>
           </div>
         );
 
@@ -713,7 +762,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
         );
       },
     },
-  ], [approvedItems, rejectedItems, dismissedItems, contentEdits, clarificationAnswers, applying, reprocessing, readOnly, rejectionReasons, showReasonInput, aiRecommendations, reevalLoading]);
+  ], [approvedItems, rejectedItems, dismissedItems, contentEdits, clarificationAnswers, applying, reprocessing, readOnly, isMatchApplied, rejectionReasons, showReasonInput, aiRecommendations, reevalLoading]);
 
   return (
     <>
@@ -732,13 +781,16 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
                   {result && (
                     <Badge color="default">{result.matches.length} match{result.matches.length !== 1 ? 'es' : ''}</Badge>
                   )}
-                  {readOnly && !hasUndismissedRejections && (
+                  {allApplied && !hasUndismissedRejections && (
                     <Badge color="info">Applied</Badge>
                   )}
-                  {readOnly && hasUndismissedRejections && (
+                  {session?.appliedAt && !allApplied && (
                     <Badge color="warning">Partial</Badge>
                   )}
-                  {!readOnly && rejectedItems.size > 0 && approvedItems.size === 0 && (
+                  {allApplied && hasUndismissedRejections && (
+                    <Badge color="warning">Needs Cleanup</Badge>
+                  )}
+                  {!session?.appliedAt && rejectedItems.size > 0 && approvedItems.size === 0 && rejectedItems.size + dismissedItems.size >= (result?.matches?.length || 0) && (
                     <Badge color="error">All Rejected</Badge>
                   )}
                 </div>
@@ -811,19 +863,25 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
                   <DataTable
                     data={tableData}
                     columns={matchColumns}
-                    actions={!readOnly ? (
+                    actions={!allApplied ? (
                       <div className="flex items-center gap-3">
-                        <button onClick={handleApproveAll}
-                          disabled={approvedItems.size >= (result.matches ?? []).filter(m => !m.isDuplicate).length}
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
-                            fontSize: '12px', fontWeight: 600, background: 'rgba(16, 163, 127, 0.1)',
-                            border: '1px solid rgba(16, 163, 127, 0.25)', color: '#50e3c2', cursor: 'pointer',
-                            opacity: approvedItems.size >= result.matches.filter(m => !m.isDuplicate).length ? 0.4 : 1,
-                          }}>
-                          <CheckCheck size={14} />
-                          Approve All
-                        </button>
+                        {(() => {
+                          const approvable = (result.matches ?? []).filter(m => !m.isDuplicate && !m.appliedAt);
+                          const allApprovedCount = approvable.length;
+                          return (
+                            <button onClick={handleApproveAll}
+                              disabled={approvedItems.size >= allApprovedCount}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
+                                fontSize: '12px', fontWeight: 600, background: 'rgba(16, 163, 127, 0.1)',
+                                border: '1px solid rgba(16, 163, 127, 0.25)', color: '#50e3c2', cursor: 'pointer',
+                                opacity: approvedItems.size >= allApprovedCount ? 0.4 : 1,
+                              }}>
+                              <CheckCheck size={14} />
+                              Approve All
+                            </button>
+                          );
+                        })()}
                         {(approvedItems.size > 0 || hasRefineData) && (
                           <button onClick={handleApplyAndRefine} disabled={applying || reprocessing} style={{
                             display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
@@ -849,7 +907,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
                                 : 'Approve matches to apply, answer questions to refine'}
                         </span>
                       </div>
-                    ) : readOnly && hasUndismissedRejections ? (
+                    ) : allApplied && hasUndismissedRejections ? (
                       <div className="flex items-center gap-3">
                         <button onClick={() => handleDismiss([...rejectedItems].filter(i => !dismissedItems.has(i)))}
                           style={{
@@ -868,8 +926,10 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
                     getRowStyle={(row) => {
                       const idx = row._index;
                       if (row.isDuplicate) return { opacity: 0.4 };
+                      if (row.appliedAt) return { borderLeft: '3px solid rgba(16, 163, 127, 0.5)', opacity: 0.5 };
+                      if (row.applyError) return { borderLeft: '3px solid var(--dtp-pink)', opacity: 0.6 };
                       if (dismissedItems.has(idx)) return { borderLeft: '3px solid var(--border-subtle)', opacity: 0.3 };
-                      if (approvedItems.has(idx)) return { borderLeft: '3px solid rgba(16, 163, 127, 0.5)', opacity: readOnly ? 1 : 0.7 };
+                      if (approvedItems.has(idx)) return { borderLeft: '3px solid rgba(16, 163, 127, 0.5)', opacity: 0.7 };
                       if (rejectedItems.has(idx)) return { borderLeft: '3px solid var(--dtp-pink)', opacity: 0.4 };
                       if (idx in contentEdits) return { borderLeft: '3px solid var(--jf-gold)' };
                       return undefined;

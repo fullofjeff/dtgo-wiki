@@ -617,7 +617,7 @@ function applyEditsToFile(filePath: string, edits: PendingEdit[]) {
   raw = raw.replace(/^(updated:\s*)"?[^"\n]*"?/m, `$1"${today}"`);
 
   // Deduplicate: skip appends whose ### heading already exists in file
-  const dedupedEdits = edits.filter(edit => {
+  let dedupedEdits = edits.filter(edit => {
     if (edit.action !== 'append') return true;
     const h3Match = edit.content.match(/^###\s+(.+?)(?:\s*—|$)/m);
     if (!h3Match) return true;
@@ -625,6 +625,21 @@ function applyEditsToFile(filePath: string, edits: PendingEdit[]) {
     const escapedName = personName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return !new RegExp(`^###\\s+${escapedName}`, 'm').test(raw);
   });
+
+  // Within-batch dedup: multiple updates to same section → keep last
+  const seenUpdateSections = new Map<string, number>();
+  for (let i = 0; i < dedupedEdits.length; i++) {
+    if (dedupedEdits[i].action === 'update' && dedupedEdits[i].section) {
+      seenUpdateSections.set(dedupedEdits[i].section.replace(/^##\s*/, '').toLowerCase(), i);
+    }
+  }
+  if (seenUpdateSections.size > 0) {
+    const keepIndices = new Set(seenUpdateSections.values());
+    dedupedEdits = dedupedEdits.filter((edit, i) => {
+      if (edit.action !== 'update' || !edit.section) return true;
+      return keepIndices.has(i);
+    });
+  }
 
   // Separate edits: new_section / no-section (appends) vs. targeted edits
   const appends: PendingEdit[] = [];
@@ -696,6 +711,66 @@ function gitCommit(files: string[], message: string): Promise<void> {
       else { console.log('[intake] git commit OK:', message); resolve(); }
     });
   });
+}
+
+// ── Pre-flight duplicate check ──
+// Deterministic check against current file state — runs before every write
+function checkForDuplicate(filePath: string, action: string, section: string | undefined, contentToApply: string): string | null {
+  const fileContent = fs.readFileSync(filePath, 'utf-8');
+  const basename = path.basename(filePath);
+
+  // 1. H3 heading check — person/entity already exists
+  const h3Match = contentToApply.match(/^###\s+(.+?)(?:\s*—|$)/m);
+  if (h3Match && action === 'append') {
+    const personName = h3Match[1].trim();
+    const escapedName = personName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`^###\\s+${escapedName}`, 'm').test(fileContent)) {
+      return `"${personName}" already exists in ${basename}`;
+    }
+  }
+
+  // 2. Content fingerprint — check if majority of content already present
+  if (action === 'append' || action === 'new_section' || action === 'update') {
+    const contentLines = contentToApply.split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 20 && !l.startsWith('**Sources:**') && !l.startsWith('[intake:'));
+    if (contentLines.length > 0) {
+      const existingCount = contentLines.filter(line => fileContent.includes(line)).length;
+      const ratio = existingCount / contentLines.length;
+      if (ratio > 0.8) {
+        return `Content already present in ${basename} (${Math.round(ratio * 100)}% overlap)`;
+      }
+    }
+  }
+
+  // 3. Section existence check for new_section
+  if (action === 'new_section' && section) {
+    const sectionName = section.replace(/^##\s*/, '');
+    const escapedSection = sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`^##\\s+${escapedSection}$`, 'm').test(fileContent)) {
+      return `Section "## ${sectionName}" already exists in ${basename}`;
+    }
+  }
+
+  // 4. Update identity check — skip if proposed content matches existing section exactly
+  if (action === 'update' && section) {
+    const sectionName = section.replace(/^##\s*/, '');
+    const escapedSection = sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const sectionRegex = new RegExp(`^##\\s+${escapedSection}$`, 'm');
+    const sMatch = sectionRegex.exec(fileContent);
+    if (sMatch) {
+      const rest = fileContent.slice(sMatch.index + sMatch[0].length);
+      const nextH2 = rest.search(/\n##\s+/);
+      const existingSection = (nextH2 >= 0 ? rest.slice(0, nextH2) : rest).trim();
+      const proposedContent = contentToApply.trim();
+      const normalize = (s: string) => s.replace(/\s+/g, ' ').trim();
+      if (normalize(existingSection) === normalize(proposedContent)) {
+        return `Update content identical to existing section in ${basename}`;
+      }
+    }
+  }
+
+  return null;
 }
 
 // ── Read request body helper ──
@@ -1090,14 +1165,18 @@ function intakeApiPlugin(): Plugin {
         // List all sessions
         if (req.url === '/api/intake/sessions') {
           // Auto-expire zombie sessions stuck in 'processing' for over 5 minutes
+          // Use processingStartedAt if set (reprocess sets this), otherwise fall back to timestamp
           const STALE_MS = 5 * 60 * 1000;
           const allSessions = readArchive();
           let dirty = false;
           for (const s of allSessions) {
-            if (s.status === 'processing' && Date.now() - new Date(s.timestamp).getTime() > STALE_MS) {
-              s.status = 'error';
-              s.error = 'Processing timed out — server may have restarted. Try rerunning.';
-              dirty = true;
+            if (s.status === 'processing') {
+              const startedAt = (s as any).processingStartedAt || s.timestamp;
+              if (Date.now() - new Date(startedAt).getTime() > STALE_MS) {
+                s.status = 'error';
+                s.error = 'Processing timed out — server may have restarted. Try rerunning.';
+                dirty = true;
+              }
             }
           }
           if (dirty) writeArchive(allSessions);
@@ -1139,19 +1218,31 @@ function intakeApiPlugin(): Plugin {
       });
 
       // POST /api/intake/apply — with pre-apply validation
+      // Serialized through applyLock to prevent concurrent writes
+      let applyLock: Promise<void> = Promise.resolve();
       server.middlewares.use('/api/intake/apply', async (req, res) => {
         if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
-        try {
+
+        // Read body outside the lock (I/O can overlap)
         const body = await readBody(req);
+
+        // Serialize: only one apply runs at a time
+        let resolve!: () => void;
+        const ticket = new Promise<void>(r => { resolve = r; });
+        const prev = applyLock;
+        applyLock = ticket;
+        await prev;
+
+        try {
         const { sessionId, approvals, contentEdits = {}, rejectionReasons = {} } = body;
         const sessions = readArchive();
         const session = sessions.find(s => s.id === sessionId);
-        if (!session || !session.result) { res.statusCode = 404; res.end('Session not found'); return; }
-        if (session.appliedAt) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ applied: 0, skipped: 0, validationResults: [], error: 'Already applied' })); return; }
+        if (!session || !session.result) { res.statusCode = 404; res.end('Session not found'); resolve(); return; }
 
         const validationResults: { index: number; valid: boolean; issues: string[]; applied: boolean }[] = [];
         const affectedFiles: string[] = [];
         const pendingFileEdits = new Map<string, PendingEdit[]>();
+        const matchIndexForEdit = new Map<string, number[]>(); // track which match indices map to each file
         const haiku = apiKeys.claude; // Use Haiku for validation
 
         for (const [indexStr, decision] of Object.entries(approvals)) {
@@ -1159,6 +1250,18 @@ function intakeApiPlugin(): Plugin {
           const idx = Number(indexStr);
           const match = session.result.matches[idx];
           if (!match) continue;
+
+          // Per-match guard: skip matches already written to disk
+          if (match.appliedAt) {
+            validationResults.push({ index: idx, valid: true, issues: ['Already applied — skipped'], applied: false });
+            continue;
+          }
+
+          // Hard block: reject matches flagged as duplicates during AI processing
+          if (match.isDuplicate) {
+            validationResults.push({ index: idx, valid: false, issues: ['Blocked — flagged as duplicate during processing'], applied: false });
+            continue;
+          }
 
           // Normalize: strip .md extension and leading _ (models sometimes include them)
           const fileSlug = (match.file || '').replace(/\.md$/, '').replace(/(^|\/)_/g, '$1');
@@ -1172,7 +1275,22 @@ function intakeApiPlugin(): Plugin {
             else {
               const dirIndex = path.join(KB_DIR, fileSlug, '_index.md');
               if (fs.existsSync(dirIndex)) filePath = dirIndex;
-              else { validationResults.push({ index: idx, valid: false, issues: ['File not found'], applied: false }); continue; }
+              else {
+                // Auto-create the file with standard frontmatter for append/new_section actions
+                const actionLc = (match.action || '').toLowerCase();
+                if (actionLc === 'append' || actionLc === 'new_section') {
+                  const title = fileSlug.charAt(0).toUpperCase() + fileSlug.slice(1);
+                  const today = new Date().toISOString().slice(0, 10);
+                  const frontmatter = `---\ntitle: "${title}"\nscope: ""\nupdated: "${today}"\n---\n\n# ${title}\n`;
+                  // Ensure parent directory exists
+                  const dir = path.dirname(filePath);
+                  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                  fs.writeFileSync(filePath, frontmatter);
+                  console.log(`[intake] Auto-created KB file: ${filePath}`);
+                } else {
+                  validationResults.push({ index: idx, valid: false, issues: ['File not found'], applied: false }); continue;
+                }
+              }
             }
           }
 
@@ -1193,7 +1311,7 @@ function intakeApiPlugin(): Plugin {
           // Handle find-replace actions (e.g., rename operations)
           const actionLower = (match.action || '').toLowerCase();
           if (actionLower === 'find_replace' || actionLower === 'find-replace' || actionLower === 'find_and_replace' || actionLower === 'replace') {
-            const details = match.details || {};
+            const details = (match as any).details || {};
             const searchPattern = details.searchPattern || details.search || '';
             const replacement = details.replacement || details.replace || '';
             if (searchPattern && replacement) {
@@ -1208,7 +1326,7 @@ function intakeApiPlugin(): Plugin {
 
           // Handle alias update actions
           if (actionLower === 'update_alias' || actionLower === 'update-alias') {
-            const details = match.details || {};
+            const details = (match as any).details || {};
             // Find the old alias and replace with new in the file
             const oldAliases = details.currentAliases || [];
             const newAliases = details.updatedAliases || [];
@@ -1232,7 +1350,7 @@ function intakeApiPlugin(): Plugin {
 
           // Standard actions (append, update, new_section, conflict)
           // Validate with Haiku (cheap + fast)
-          let contentToApply = contentEdits[String(idx)] ?? match.content ?? match.description ?? '';
+          let contentToApply = contentEdits[String(idx)] ?? match.content ?? (match as any).description ?? '';
           if (haiku) {
             try {
               const valPrompt = `You are a knowledge base quality checker. Validate and FIX this proposed addition.
@@ -1287,31 +1405,27 @@ Return ONLY valid JSON:
                   validationResults.push({ index: idx, valid: true, issues: [], applied: true });
                 }
               } else {
-                // Validation API failed — proceed without validation
-                validationResults.push({ index: idx, valid: true, issues: ['Validation skipped — API error'], applied: true });
+                // Validation API failed — proceed but flag prominently
+                validationResults.push({ index: idx, valid: true, issues: ['WARNING: Haiku validation unavailable — content applied without AI review'], applied: true });
               }
-            } catch {
-              // Validation failed — proceed anyway
-              validationResults.push({ index: idx, valid: true, issues: ['Validation skipped'], applied: true });
+            } catch (valErr) {
+              // Validation threw — proceed but flag prominently
+              console.error('[intake] Haiku validation error for match', idx, ':', valErr);
+              validationResults.push({ index: idx, valid: true, issues: ['WARNING: Haiku validation error — content applied without AI review'], applied: true });
             }
           } else {
             validationResults.push({ index: idx, valid: true, issues: ['No validation key'], applied: true });
           }
 
-          // Hard duplicate check: skip if this person/entity heading already exists in file
-          const h3Match = contentToApply.match(/^###\s+(.+?)(?:\s*—|$)/m);
-          if (h3Match && match.action === 'append') {
-            const personName = h3Match[1].trim();
-            const escapedName = personName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const fileContent = fs.readFileSync(filePath, 'utf-8');
-            if (new RegExp(`^###\\s+${escapedName}`, 'm').test(fileContent)) {
-              validationResults.push({
-                index: idx, valid: false,
-                issues: [`SKIPPED: "${personName}" already exists in ${path.basename(filePath)}`],
-                applied: false
-              });
-              continue;
-            }
+          // Deterministic pre-flight duplicate check against current file state
+          const dupReason = checkForDuplicate(filePath, match.action, match.section, contentToApply);
+          if (dupReason) {
+            match.applyError = dupReason;
+            // Override the optimistic validation result with a skip
+            const existingVr = validationResults.find(v => v.index === idx);
+            if (existingVr) { existingVr.valid = false; existingVr.issues = [`BOUNCED: ${dupReason}`]; existingVr.applied = false; }
+            else { validationResults.push({ index: idx, valid: false, issues: [`BOUNCED: ${dupReason}`], applied: false }); }
+            continue;
           }
 
           // Append intake source reference to content
@@ -1323,8 +1437,9 @@ Return ONLY valid JSON:
           }
 
           // Collect standard edits for batched per-file application
-          if (!pendingFileEdits.has(filePath)) pendingFileEdits.set(filePath, []);
+          if (!pendingFileEdits.has(filePath)) { pendingFileEdits.set(filePath, []); matchIndexForEdit.set(filePath, []); }
           pendingFileEdits.get(filePath)!.push({ section: match.section, action: match.action, content: contentToApply });
+          matchIndexForEdit.get(filePath)!.push(idx);
           affectedFiles.push(filePath);
         }
 
@@ -1333,22 +1448,31 @@ Return ONLY valid JSON:
           applyEditsToFile(filePath, edits);
         }
 
+        // Stamp appliedAt on each successfully written match
+        const now = new Date().toISOString();
+        for (const vr of validationResults) {
+          if (vr.applied && session.result?.matches[vr.index]) {
+            session.result.matches[vr.index].appliedAt = now;
+          }
+        }
+
         // Update session approvals and rejection reasons
-        session.approvals = approvals;
+        session.approvals = { ...(session.approvals || {}), ...approvals };
         if (Object.keys(rejectionReasons).length > 0) {
           session.rejectionReasons = { ...(session.rejectionReasons || {}), ...rejectionReasons };
         }
 
-        // Only set appliedAt if at least one item was approved
-        const hasApproved = Object.values(approvals).some(v => v === 'approved');
-        if (hasApproved) {
-          session.appliedAt = new Date().toISOString();
+        // Session-level appliedAt: informational timestamp of first apply
+        const hasApplied = validationResults.some(v => v.applied);
+        if (hasApplied && !session.appliedAt) {
+          session.appliedAt = now;
         }
 
         // Check if fully resolved (every match decided as approved or dismissed)
         const matchCount = session.result?.matches?.length || 0;
+        const mergedApprovals = session.approvals;
         const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => String(i))
-          .every(idx => approvals[idx] === 'approved' || approvals[idx] === 'dismissed');
+          .every(idx => mergedApprovals[idx] === 'approved' || mergedApprovals[idx] === 'dismissed');
         if (allResolved) {
           session.resolvedAt = new Date().toISOString();
         }
@@ -1356,9 +1480,10 @@ Return ONLY valid JSON:
         writeArchive(sessions);
 
         // Git commit
-        if (affectedFiles.length > 0) {
+        const uniqueAffected = [...new Set(affectedFiles)];
+        if (uniqueAffected.length > 0) {
           try {
-            await gitCommit(affectedFiles, `intake: ${session.result.summary || 'applied approved changes'}`);
+            await gitCommit(uniqueAffected, `intake: ${session.result.summary || 'applied approved changes'}`);
           } catch (gitErr) {
             console.error('[intake] git commit failed — changes applied but NOT committed:', gitErr);
             validationResults.push({
@@ -1391,6 +1516,8 @@ Return ONLY valid JSON:
         } catch (err: unknown) {
           console.error('[intake/apply] Unhandled error:', err);
           if (!res.headersSent) { res.statusCode = 500; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ applied: 0, skipped: 0, validationResults: [], error: err instanceof Error ? err.message : 'Unknown error' })); }
+        } finally {
+          resolve();
         }
       });
 
@@ -1535,14 +1662,41 @@ Respond with ONLY valid JSON (no markdown fences):
         const haiku = apiKeys.claude;
         if (!haiku) { res.statusCode = 500; res.end('Claude API key not set'); return; }
 
+        // Snapshot ALL matches and their approval states before AI call
+        const oldMatches = session.result?.matches || [];
+        const oldApprovals = { ...session.approvals };
+
+        // Separate: matches that were edited (need AI refinement) vs untouched (preserve as-is)
+        const editedIndices = new Set(Object.keys(contentEdits).map(Number));
+        const clarificationIndices = new Set(Object.keys(clarificationAnswers || {}).map(Number));
+        const conflictIndices = new Set(Object.keys(conflictResolutions).filter(k => conflictResolutions[k]?.trim()).map(Number));
+        const touchedIndices = new Set([...editedIndices, ...clarificationIndices, ...conflictIndices]);
+
+        // Only send touched matches to AI for refinement; preserve everything else
+        const matchesToRefine = oldMatches.filter((_, i) => touchedIndices.has(i));
+        const preservedMatches: { match: any; index: number; status?: string }[] = [];
+        for (let i = 0; i < oldMatches.length; i++) {
+          if (!touchedIndices.has(i)) {
+            preservedMatches.push({ match: oldMatches[i], index: i, status: oldApprovals[String(i)] });
+          }
+        }
+
+        // Mark session as reprocessing so UI shows spinner
+        session.status = 'processing';
+        (session as any).processingStartedAt = new Date().toISOString();
+        writeArchive(sessions);
+
         try {
-          const reprocessPrompt = `You previously analyzed source text and returned intake suggestions. The user has answered your clarification questions. Refine your matches based on their answers.
+          // Only call AI if there are actually matches to refine
+          let refinedMatches: any[] = [];
+          if (matchesToRefine.length > 0) {
+            const reprocessPrompt = `You previously analyzed source text and returned intake suggestions. The user has edited some matches or answered clarification questions. Refine ONLY the items below based on their input.
 
 ORIGINAL SOURCE TEXT:
 ${session.sourceText}
 
-YOUR PREVIOUS RESULT:
-${JSON.stringify(session.result, null, 2)}
+MATCHES TO REFINE (only these — do NOT add new matches beyond what's here):
+${JSON.stringify(matchesToRefine, null, 2)}
 
 USER'S CLARIFICATION ANSWERS:
 ${JSON.stringify(clarificationAnswers, null, 2)}
@@ -1556,28 +1710,29 @@ ${Object.keys(conflictResolutions).length > 0 ? JSON.stringify(conflictResolutio
 MASTER INDEX:
 ${JSON.stringify(masterIndex, null, 2)}
 
-Now return a refined JSON result with the SAME structure. Replace any clarification items with concrete matches based on the user's answers. Resolve conflicts using the user's guidance — update the "conflicts" array to remove resolved ones and convert them to concrete matches where appropriate. Do NOT include a "clarifications" array — all ambiguities should now be resolved.
+Return ONLY the refined versions of the matches above. Do NOT regenerate untouched matches — those are preserved separately. Do NOT add new matches. Resolve conflicts using the user's guidance. If a match was edited, use the user's edited content as the base.
 
-Return ONLY valid JSON, no markdown fences.`;
+Return ONLY valid JSON with this structure, no markdown fences:
+{ "matches": [...], "conflicts": [], "newFiles": [], "summary": "" }`;
 
-          const { url, init } = providerConfigs.claude.buildRequest(haiku, 'claude-haiku-4-5', reprocessPrompt, 'Refine the intake based on clarification answers.');
-          const apiRes = await fetch(url, init);
+            const { url, init } = providerConfigs.claude.buildRequest(haiku, 'claude-haiku-4-5', reprocessPrompt, 'Refine the intake based on user edits.');
+            const apiRes = await fetch(url, init);
 
-          if (!apiRes.ok) {
-            const errText = await apiRes.text();
-            res.statusCode = apiRes.status;
-            res.end(`Reprocess error: ${errText}`);
-            return;
+            if (!apiRes.ok) {
+              const errText = await apiRes.text();
+              // Restore session state on failure
+              session.status = 'ready';
+              writeArchive(sessions);
+              res.statusCode = apiRes.status;
+              res.end(`Reprocess error: ${errText}`);
+              return;
+            }
+
+            const apiData = await apiRes.json();
+            const content = providerConfigs.claude.extractText(apiData);
+            const parsed = parseAiJson(content);
+            refinedMatches = Array.isArray(parsed.matches) ? parsed.matches : [];
           }
-
-          const apiData = await apiRes.json();
-          const content = providerConfigs.claude.extractText(apiData);
-          const parsed = parseAiJson(content);
-          // Ensure required fields have safe defaults (AI may omit empty arrays)
-          parsed.matches = Array.isArray(parsed.matches) ? parsed.matches : [];
-          parsed.newFiles = Array.isArray(parsed.newFiles) ? parsed.newFiles : [];
-          parsed.conflicts = Array.isArray(parsed.conflicts) ? parsed.conflicts : [];
-          parsed.summary = parsed.summary || '';
 
           // Append clarification answers to the source document
           const answerText = Object.entries(clarificationAnswers || {})
@@ -1594,21 +1749,52 @@ Return ONLY valid JSON, no markdown fences.`;
             session.sourceText = `${session.sourceText}\n\n--- User Clarifications (${new Date().toISOString()}) ---\n${answerText}`;
           }
 
-          // Update session with refined result — clear stale approvals since matches changed
-          session.result = parsed;
-          session.approvals = {};
-          delete session.appliedAt;
+          // Rebuild matches: preserved (untouched) in original order, refined appended at end
+          const finalMatches: any[] = [];
+          const newApprovals: Record<string, 'approved' | 'rejected' | 'dismissed'> = {};
+
+          // First: all preserved matches in their original positions
+          for (const p of preservedMatches) {
+            const newIdx = finalMatches.length;
+            finalMatches.push(p.match);
+            if (p.status) newApprovals[String(newIdx)] = p.status as any;
+          }
+
+          // Then: refined matches (these are new/updated — no approval set)
+          for (const m of refinedMatches) {
+            finalMatches.push(m);
+          }
+
+          const finalResult = {
+            matches: finalMatches,
+            conflicts: session.result?.conflicts || [],
+            newFiles: session.result?.newFiles || [],
+            summary: session.result?.summary || '',
+          };
+
+          session.result = finalResult;
+          session.approvals = newApprovals;
+          // Keep appliedAt — those items were already applied to KB
+          delete session.resolvedAt; // session has new items to review
+          session.status = 'ready';
           writeArchive(sessions);
 
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(parsed));
         } catch (err: unknown) {
+          session.status = 'ready';
+          writeArchive(sessions);
           res.statusCode = 500;
           const msg = err instanceof Error ? err.message : 'Unknown error';
           res.end(`Reprocess error: ${msg}`);
         }
         } catch (outerErr: unknown) {
           console.error('[intake/reprocess] Unhandled error:', outerErr);
+          try {
+            const sessions2 = readArchive();
+            const s2 = sessions2.find((s: any) => s.id === sessionId);
+            if (s2 && s2.status === 'processing') { s2.status = 'ready'; writeArchive(sessions2); }
+          } catch { /* ignore */ }
           if (!res.headersSent) { res.statusCode = 500; res.end(`Reprocess error: ${outerErr instanceof Error ? outerErr.message : 'Unknown'}`); }
         }
       });
@@ -2111,12 +2297,13 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
 
         // Create session and return ID immediately
         const sessionId = crypto.randomUUID();
+        const now = new Date().toISOString();
         const session: IntakeSession = {
-          id: sessionId, timestamp: new Date().toISOString(),
+          id: sessionId, timestamp: now,
           provider, model: requestModel || cfg.defaultModel,
           status: 'processing', sourceExcerpt: text.slice(0, 200), sourceText: text,
-          systemInstructions, approvals: {},
-        };
+          systemInstructions, approvals: {}, processingStartedAt: now,
+        } as any;
         const sessions = readArchive();
         sessions.push(session);
         writeArchive(sessions);
@@ -2373,7 +2560,12 @@ Rules:
             const content = cfg.extractText(apiData);
             const parsed = parseAiJson(content);
 
-            updateSession(sessionId, { status: 'ready', result: parsed });
+            updateSession(sessionId, {
+              status: 'ready',
+              result: parsed,
+              matchCount: parsed.matches?.length || 0,
+              conflictCount: parsed.conflicts?.length || 0,
+            });
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Unknown error';
             updateSession(sessionId, { status: 'error', error: msg });

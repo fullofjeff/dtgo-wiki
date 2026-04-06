@@ -659,8 +659,8 @@ export function DirectoryPage() {
                   </span>
                 )}
                 {att.source === 'local'
-                  ? <HardDrive size={13} style={{ color: 'var(--jf-gold)', flexShrink: 0, opacity: 0.6 }} title="Local file" />
-                  : <Cloud size={13} style={{ color: 'var(--jf-lavender)', flexShrink: 0, opacity: 0.6 }} title="Firebase" />
+                  ? <span title="Local file" style={{ display: 'flex', flexShrink: 0 }}><HardDrive size={13} style={{ color: 'var(--jf-gold)', opacity: 0.6 }} /></span>
+                  : <span title="Firebase" style={{ display: 'flex', flexShrink: 0 }}><Cloud size={13} style={{ color: 'var(--jf-lavender)', opacity: 0.6 }} /></span>
                 }
                 <Download size={14} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
               </button>

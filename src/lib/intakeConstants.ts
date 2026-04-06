@@ -9,22 +9,31 @@ export const actionLabels: Record<string, { label: string; color: string }> = {
   clarification: { label: 'Needs Input', color: 'var(--jf-gold)' },
 };
 
-export type SessionState = 'processing' | 'ready' | 'error' | 'applied' | 'partially_applied' | 'all_rejected' | 'resolved';
+export type SessionState = 'processing' | 'reprocessing' | 'ready' | 'error' | 'applied' | 'partially_applied' | 'all_rejected' | 'resolved';
 
 /** Derive the display state of an intake session */
-export function getSessionState(session: Pick<IntakeSession, 'status' | 'approvals' | 'appliedAt' | 'resolvedAt'>): SessionState {
-  if (session.status === 'processing') return 'processing';
-  if (session.status === 'error') return 'error';
-  if (session.resolvedAt) return 'resolved';
+export function getSessionState(session: Pick<IntakeSession, 'status' | 'approvals' | 'appliedAt' | 'resolvedAt' | 'matchCount'> & { result?: { matches?: unknown[] } }): SessionState {
+  if (session.status === 'processing') {
+    return session.appliedAt ? 'reprocessing' : 'processing';
+  }
+  if (session.status === 'error') return session.resolvedAt ? 'resolved' : 'error';
 
   const approvalValues = Object.values(session.approvals || {});
+  const decisionCount = approvalValues.length;
+  const totalMatches = session.matchCount || session.result?.matches?.length || 0;
   const hasRejected = approvalValues.some(v => v === 'rejected');
+  const allDecided = totalMatches > 0 && decisionCount >= totalMatches;
 
+  // If explicitly resolved, honour that regardless of partial approval state
+  if (session.resolvedAt && session.appliedAt) return 'applied';
+  if (session.resolvedAt && !session.appliedAt) return 'resolved';
+
+  // Applied but not yet resolved — check if all matches were decided
   if (session.appliedAt) {
-    return hasRejected ? 'partially_applied' : 'applied';
+    return allDecided && !hasRejected ? 'applied' : 'partially_applied';
   }
 
-  if (approvalValues.length > 0 && approvalValues.every(v => v === 'rejected' || v === 'dismissed')) {
+  if (allDecided && approvalValues.every(v => v === 'rejected' || v === 'dismissed')) {
     return hasRejected ? 'all_rejected' : 'resolved';
   }
 

@@ -204,8 +204,9 @@ export function IntakePage() {
   // Fetch providers and seed localStorage
   useEffect(() => {
     fetch('/api/intake/providers')
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : [])
       .then((list: ProviderInfo[]) => {
+        if (!Array.isArray(list)) return;
         if (list.length === 0) return;
         const config: ModelVariantsConfig = {
           providers: Object.fromEntries(
@@ -224,7 +225,7 @@ export function IntakePage() {
 
   // Fetch past sessions
   const loadPastSessions = useCallback(() => {
-    fetch('/api/intake/sessions').then(r => r.json()).then(setPastSessions).catch(() => {});
+    fetch('/api/intake/sessions').then(r => r.ok ? r.json() : []).then(d => { if (Array.isArray(d)) setPastSessions(d); }).catch(() => {});
   }, []);
 
   useEffect(() => { loadPastSessions(); }, [loadPastSessions]);
@@ -339,6 +340,7 @@ export function IntakePage() {
   };
 
   const handleApprove = (index: number) => {
+    if (result?.matches[index]?.isDuplicate) return;
     setApprovedItems(prev => { const s = new Set(prev); s.add(index); return s; });
     setRejectedItems(prev => { const s = new Set(prev); s.delete(index); return s; });
   };
@@ -951,7 +953,7 @@ export function IntakePage() {
             e.preventDefault();
             e.currentTarget.style.borderColor = 'var(--border-default)';
             const droppedFiles = Array.from(e.dataTransfer.files).filter(
-              f => f.type === 'application/pdf' || f.name.endsWith('.csv') || f.type === 'text/csv'
+              f => f.type === 'application/pdf' || f.name.endsWith('.csv') || f.type === 'text/csv' || f.name.endsWith('.md')
             );
             if (droppedFiles.length > 0) setUploadedFiles(prev => [...prev, ...droppedFiles]);
           }}
@@ -969,7 +971,7 @@ export function IntakePage() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.csv"
+            accept=".pdf,.csv,.md"
             multiple
             style={{ display: 'none' }}
             onChange={e => {
@@ -980,7 +982,7 @@ export function IntakePage() {
           />
           <div className="flex items-center justify-center gap-2" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
             <Upload size={14} />
-            <span>Drop PDF or CSV files here, or click to browse</span>
+            <span>Drop PDF, CSV, or Markdown files here, or click to browse</span>
           </div>
         </div>
 
@@ -997,7 +999,7 @@ export function IntakePage() {
                   fontSize: '12px', color: 'var(--text-primary)',
                 }}
               >
-                {file.type === 'application/pdf' ? <FileText size={12} style={{ color: 'var(--jf-gold)' }} /> : <FileIcon size={12} style={{ color: 'var(--dtgo-green)' }} />}
+                {file.type === 'application/pdf' ? <FileText size={12} style={{ color: 'var(--jf-gold)' }} /> : file.name.endsWith('.md') ? <FileText size={12} style={{ color: 'var(--jf-lavender)' }} /> : <FileIcon size={12} style={{ color: 'var(--dtgo-green)' }} />}
                 <span style={{ maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>
                 <span style={{ color: 'var(--text-secondary)' }}>({(file.size / 1024).toFixed(0)} KB)</span>
                 <button

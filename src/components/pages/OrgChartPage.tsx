@@ -11,7 +11,6 @@ import {
   type Node,
   type Edge,
   type Connection,
-  type NodeDragHandler,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useNavigate } from 'react-router-dom';
@@ -342,11 +341,11 @@ function OrgChartInner() {
   // ── Drag children with parent ──
   const dragStartPos = useRef<{ x: number; y: number } | null>(null);
 
-  const handleNodeDragStart: NodeDragHandler = useCallback((_event, node) => {
+  const handleNodeDragStart = useCallback((_event: React.MouseEvent | MouseEvent, node: Node) => {
     dragStartPos.current = { x: node.position.x, y: node.position.y };
   }, []);
 
-  const handleNodeDragStop: NodeDragHandler = useCallback((_event, node) => {
+  const handleNodeDragStop = useCallback((_event: React.MouseEvent | MouseEvent, node: Node) => {
     if (!dragStartPos.current) return;
     const dx = node.position.x - dragStartPos.current.x;
     const dy = node.position.y - dragStartPos.current.y;
