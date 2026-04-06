@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { type ColumnDef } from '@tanstack/react-table';
-import { Home, ChevronRight, UserPlus, FileText, File, Image, Loader2, Download, Paperclip } from 'lucide-react';
+import { Home, ChevronRight, UserPlus, FileText, File, Image, Loader2, Download, Upload, X, HardDrive, Cloud } from 'lucide-react';
 import { getFile } from '@/data/loader';
 import { getPersonRecord } from '@/data/personIndex';
 import { initialOrgEntities } from '@/data/orgData';
@@ -44,6 +44,7 @@ interface Attachment {
   storagePath: string;
   uploadedAt: string;
   fileSize: number;
+  source: 'firebase' | 'local';
 }
 
 type FilterType = 'all' | 'pdf' | 'csv' | 'image';
@@ -137,27 +138,87 @@ export function DirectoryPage() {
   const [viewerAttachment, setViewerAttachment] = useState<Attachment | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [urlLoading, setUrlLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [sectionDragging, setSectionDragging] = useState(false);
+  const dragCounter = useRef(0);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; att: Attachment } | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/api/attachments');
-        if (!res.ok) return;
-        const data = await res.json();
-        setAttachments(data);
-      } catch {
-        // silently fail
-      } finally {
-        setAttachmentsLoading(false);
+  const fetchAttachments = async () => {
+    setAttachmentsLoading(true);
+    try {
+      const [firebaseRes, localRes] = await Promise.allSettled([
+        fetch('/api/attachments'),
+        fetch('/api/local-attachments'),
+      ]);
+
+      const firebaseData: Attachment[] = firebaseRes.status === 'fulfilled' && firebaseRes.value.ok
+        ? (await firebaseRes.value.json()).map((a: Attachment) => ({ ...a, source: 'firebase' as const }))
+        : [];
+
+      const localData: Attachment[] = localRes.status === 'fulfilled' && localRes.value.ok
+        ? await localRes.value.json()
+        : [];
+
+      setAttachments([...localData, ...firebaseData]);
+    } catch {
+      // silently fail
+    } finally {
+      setAttachmentsLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchAttachments(); }, []);
+
+  const handleUpload = async () => {
+    if (pendingFiles.length === 0) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      for (const file of pendingFiles) {
+        formData.append('files', file);
       }
-    })();
-  }, []);
+      const res = await fetch('/api/upload-attachment', { method: 'POST', body: formData });
+      if (res.ok) {
+        setPendingFiles([]);
+        await fetchAttachments();
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleRename = async (att: Attachment, newName: string) => {
+    if (!newName || newName === att.filename) { setRenaming(null); return; }
+    try {
+      const res = await fetch('/api/rename-attachment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oldName: att.filename, newName, source: att.source }),
+      });
+      if (res.ok) await fetchAttachments();
+    } catch {
+      // silently fail
+    } finally {
+      setRenaming(null);
+    }
+  };
 
   const openAttachment = async (att: Attachment) => {
     setViewerAttachment(att);
     setViewerOpen(true);
     setUrlLoading(true);
     try {
+      if (att.source === 'local') {
+        setViewerUrl(`/api/local-attachments/${encodeURIComponent(att.filename)}`);
+        setUrlLoading(false);
+        return;
+      }
       const res = await fetch(`/api/attachments/${att.id}/url`);
       if (!res.ok) throw new Error('Failed to get URL');
       const { url } = await res.json();
@@ -351,11 +412,121 @@ export function DirectoryPage() {
       {/* Attachments */}
       <FormSection
         title="Attachments"
-        icon={Paperclip}
         description={`${attachments.length} files`}
         defaultOpen={false}
       >
-        {/* Filter chips */}
+        {/* Section-wide drop target */}
+        <div
+          onDragEnter={e => { e.preventDefault(); dragCounter.current++; setSectionDragging(true); }}
+          onDragOver={e => { e.preventDefault(); }}
+          onDragLeave={e => { e.preventDefault(); dragCounter.current--; if (dragCounter.current === 0) setSectionDragging(false); }}
+          onDrop={e => {
+            e.preventDefault();
+            dragCounter.current = 0;
+            setSectionDragging(false);
+            const droppedFiles = Array.from(e.dataTransfer.files);
+            if (droppedFiles.length > 0) setPendingFiles(prev => [...prev, ...droppedFiles]);
+          }}
+          style={{
+            position: 'relative',
+            borderRadius: 'var(--radius-card)',
+            border: sectionDragging ? '2px dashed var(--jf-gold)' : '2px dashed transparent',
+            padding: sectionDragging ? '0' : '0',
+            transition: 'border-color 0.2s',
+          }}
+        >
+          {/* Drag overlay */}
+          {sectionDragging && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 10,
+              background: 'rgba(216,131,10,0.06)',
+              borderRadius: 'var(--radius-card)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              pointerEvents: 'none',
+            }}>
+              <div style={{ color: 'var(--jf-gold)', fontSize: '14px', fontWeight: 600 }}>
+                Drop files anywhere here
+              </div>
+            </div>
+          )}
+
+          {/* Drop zone indicator */}
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              marginBottom: '12px',
+              padding: '14px',
+              border: '2px dashed var(--border-default)',
+              borderRadius: 'var(--radius-input)',
+              cursor: 'pointer',
+              textAlign: 'center',
+              transition: 'border-color 0.2s',
+            }}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={e => {
+                const files = Array.from(e.target.files || []);
+                if (files.length > 0) setPendingFiles(prev => [...prev, ...files]);
+                e.target.value = '';
+              }}
+            />
+            <div className="flex items-center justify-center gap-2" style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+              <Upload size={14} />
+              <span>Drop files here, or click to browse</span>
+            </div>
+          </div>
+
+          {/* Pending files */}
+          {pendingFiles.length > 0 && (
+            <div style={{ marginBottom: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {pendingFiles.map((file, idx) => (
+                  <div
+                    key={`${file.name}-${idx}`}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '6px',
+                      padding: '4px 10px', background: 'var(--bg-surface-inset)',
+                      border: '1px solid var(--border-default)', borderRadius: '6px',
+                      fontSize: '12px', color: 'var(--text-primary)',
+                    }}
+                  >
+                    {getFileIcon(file.type)}
+                    <span style={{ maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>({(file.size / 1024).toFixed(0)} KB)</span>
+                    <button
+                      onClick={e => { e.stopPropagation(); setPendingFiles(prev => prev.filter((_, i) => i !== idx)); }}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', color: 'var(--text-secondary)' }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={handleUpload}
+                disabled={uploading}
+                style={{
+                  alignSelf: 'flex-start',
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  padding: '6px 14px', borderRadius: '6px',
+                  background: 'var(--jf-gold)', border: 'none',
+                  color: '#191918', fontSize: '12px', fontWeight: 600,
+                  cursor: uploading ? 'wait' : 'pointer',
+                  opacity: uploading ? 0.6 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                {uploading ? 'Uploading...' : 'Upload'}
+              </button>
+            </div>
+          )}
+
+          {/* Filter chips */}
         <div className="flex gap-2 mb-4">
           {attachmentFilters.map(f => (
             <button
@@ -395,12 +566,11 @@ export function DirectoryPage() {
             border: '1px dashed var(--border-default)',
             borderRadius: 'var(--radius-card)',
           }}>
-            <Paperclip size={32} style={{ margin: '0 auto 12px', opacity: 0.4 }} />
             <div style={{ fontSize: '14px' }}>
               {attachmentFilter === 'all' ? 'No attachments yet' : `No ${attachmentFilter.toUpperCase()} files found`}
             </div>
             <div style={{ fontSize: '12px', marginTop: '4px', opacity: 0.6 }}>
-              Files uploaded through intake will appear here
+              Drop files above or upload through intake
             </div>
           </div>
         )}
@@ -411,7 +581,11 @@ export function DirectoryPage() {
             {filteredAttachments.map(att => (
               <button
                 key={att.id}
-                onClick={() => openAttachment(att)}
+                onClick={() => { if (renaming !== att.id) openAttachment(att); }}
+                onContextMenu={e => {
+                  e.preventDefault();
+                  setContextMenu({ x: e.clientX, y: e.clientY, att });
+                }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -430,16 +604,41 @@ export function DirectoryPage() {
               >
                 {getFileIcon(att.mimeType)}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: '13px',
-                    fontWeight: 500,
-                    color: 'var(--text-primary)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}>
-                    {att.filename}
-                  </div>
+                  {renaming === att.id ? (
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onChange={e => setRenameValue(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleRename(att, renameValue);
+                        if (e.key === 'Escape') setRenaming(null);
+                      }}
+                      onBlur={() => handleRename(att, renameValue)}
+                      onClick={e => e.stopPropagation()}
+                      style={{
+                        width: '100%',
+                        fontSize: '13px',
+                        fontWeight: 500,
+                        color: 'var(--text-primary)',
+                        background: 'var(--bg-input)',
+                        border: '1px solid var(--jf-gold)',
+                        borderRadius: '4px',
+                        padding: '2px 6px',
+                        outline: 'none',
+                      }}
+                    />
+                  ) : (
+                    <div style={{
+                      fontSize: '13px',
+                      fontWeight: 500,
+                      color: 'var(--text-primary)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {att.filename}
+                    </div>
+                  )}
                   <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
                     {formatFileSize(att.fileSize)} · {new Date(att.uploadedAt).toLocaleDateString()}
                   </div>
@@ -459,11 +658,61 @@ export function DirectoryPage() {
                     {att.division}
                   </span>
                 )}
+                {att.source === 'local'
+                  ? <HardDrive size={13} style={{ color: 'var(--jf-gold)', flexShrink: 0, opacity: 0.6 }} title="Local file" />
+                  : <Cloud size={13} style={{ color: 'var(--jf-lavender)', flexShrink: 0, opacity: 0.6 }} title="Firebase" />
+                }
                 <Download size={14} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
               </button>
             ))}
           </div>
         )}
+
+        {/* Context menu */}
+        {contextMenu && (
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 50 }}
+            onClick={() => setContextMenu(null)}
+            onContextMenu={e => { e.preventDefault(); setContextMenu(null); }}
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                position: 'fixed',
+                left: contextMenu.x,
+                top: contextMenu.y,
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border-default)',
+                borderRadius: '8px',
+                padding: '4px',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                zIndex: 51,
+                minWidth: '140px',
+              }}
+            >
+              <button
+                onClick={() => {
+                  setRenaming(contextMenu.att.id);
+                  setRenameValue(contextMenu.att.filename);
+                  setContextMenu(null);
+                }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                  width: '100%', padding: '8px 12px',
+                  background: 'none', border: 'none', borderRadius: '6px',
+                  color: 'var(--text-primary)', fontSize: '13px',
+                  cursor: 'pointer', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(201,207,233,0.08)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                Rename
+              </button>
+            </div>
+          </div>
+        )}
+
+        </div>{/* end section-wide drop target */}
       </FormSection>
 
       <PersonModal

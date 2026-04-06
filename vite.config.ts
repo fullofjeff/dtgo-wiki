@@ -1850,11 +1850,8 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
 
         (async () => {
           try {
-            const { getApps: getAdminApps } = await import('firebase-admin/app');
-            const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
-            const adminApp = getAdminApps()[0];
-            if (!adminApp) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
-            const adminDb = getAdminFirestore(adminApp);
+            const adminDb = getAdminDb();
+            if (!adminDb) { res.statusCode = 503; res.end('Firebase Admin not initialized'); return; }
             const docs = await listAllAttachments(adminDb);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(docs));
@@ -1911,6 +1908,154 @@ FORMATTING: Match the existing style exactly. Person entries use ### Name — Ro
             res.end(`Error: ${(err as Error).message}`);
           }
         })();
+      });
+
+      // POST /api/upload-attachment — save files to local DTGO_ATTATCHMENTS folder
+      const ATTACHMENTS_DIR = '/Users/jeffreyfullerton/PHYLA_BACKEND/lbe_data/DTGO_ATTATCHMENTS';
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'POST' || req.url !== '/api/upload-attachment') return next();
+
+        (async () => {
+          try {
+            // Ensure directory exists
+            if (!fs.existsSync(ATTACHMENTS_DIR)) {
+              fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+            }
+
+            const { files } = await readMultipartBody(req);
+            const saved: { filename: string; mimeType: string; fileSize: number; uploadedAt: string }[] = [];
+
+            for (const file of files) {
+              const filePath = path.join(ATTACHMENTS_DIR, file.filename);
+              fs.writeFileSync(filePath, file.buffer);
+              saved.push({
+                filename: file.filename,
+                mimeType: file.mimeType,
+                fileSize: file.buffer.length,
+                uploadedAt: new Date().toISOString(),
+              });
+            }
+
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(saved));
+          } catch (err) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: (err as Error).message }));
+          }
+        })();
+      });
+
+      // GET /api/local-attachments — list files in local DTGO_ATTATCHMENTS folder
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'GET' || req.url !== '/api/local-attachments') return next();
+
+        try {
+          if (!fs.existsSync(ATTACHMENTS_DIR)) {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify([]));
+            return;
+          }
+
+          const mimeMap: Record<string, string> = {
+            '.pdf': 'application/pdf',
+            '.csv': 'text/csv',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.svg': 'image/svg+xml',
+            '.txt': 'text/plain',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.xls': 'application/vnd.ms-excel',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          };
+
+          const entries = fs.readdirSync(ATTACHMENTS_DIR);
+          const files = entries
+            .filter(name => !name.startsWith('.'))
+            .map(name => {
+              const filePath = path.join(ATTACHMENTS_DIR, name);
+              const stat = fs.statSync(filePath);
+              if (!stat.isFile()) return null;
+              const ext = path.extname(name).toLowerCase();
+              return {
+                id: `local-${name}`,
+                filename: name,
+                mimeType: mimeMap[ext] || 'application/octet-stream',
+                division: '',
+                storagePath: filePath,
+                uploadedAt: stat.mtime.toISOString(),
+                fileSize: stat.size,
+                source: 'local' as const,
+              };
+            })
+            .filter(Boolean);
+
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(files));
+        } catch (err) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: (err as Error).message }));
+        }
+      });
+
+      // GET /api/local-attachments/:filename — serve a local file for viewing
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        const match = req.url?.match(/^\/api\/local-attachments\/(.+)$/);
+        if (!match) return next();
+        const filename = decodeURIComponent(match[1]);
+        const filePath = path.join(ATTACHMENTS_DIR, filename);
+
+        if (!fs.existsSync(filePath)) {
+          res.statusCode = 404;
+          res.end('File not found');
+          return;
+        }
+
+        const ext = path.extname(filename).toLowerCase();
+        const mimeMap: Record<string, string> = {
+          '.pdf': 'application/pdf', '.csv': 'text/csv', '.png': 'image/png',
+          '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+          '.webp': 'image/webp', '.svg': 'image/svg+xml',
+        };
+        res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+        const stream = fs.createReadStream(filePath);
+        stream.pipe(res);
+      });
+
+      // POST /api/rename-attachment — rename a local file
+      server.middlewares.use((req, res, next) => {
+        if (req.method !== 'POST' || req.url !== '/api/rename-attachment') return next();
+
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        req.on('end', () => {
+          try {
+            const { oldName, newName } = JSON.parse(body);
+            if (!oldName || !newName) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'oldName and newName required' }));
+              return;
+            }
+            const oldPath = path.join(ATTACHMENTS_DIR, oldName);
+            const newPath = path.join(ATTACHMENTS_DIR, newName);
+            if (!fs.existsSync(oldPath)) {
+              res.statusCode = 404;
+              res.end(JSON.stringify({ error: 'File not found' }));
+              return;
+            }
+            fs.renameSync(oldPath, newPath);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+          } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: (err as Error).message }));
+          }
+        });
       });
 
       // POST /api/intake — background processing with master index
