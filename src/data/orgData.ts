@@ -95,6 +95,16 @@ export const initialOrgEntities: OrgEntity[] = [
       'Registered in 2014 with ฿5.39B capital. Develops projects in the Pattaya and Na Jomtien area under the MQDC portfolio.',
   },
   {
+    id: 'storied-place',
+    name: 'Storied Place Management',
+    description: 'Happitat Operations',
+    parentId: 'mqdc',
+    leader: { name: 'Orada Kerdhong', title: 'President' },
+    accentColor: 'var(--mqdc-blue)',
+    summary:
+      'MQDC entity responsible for the development and management of The Happitat at The Forestias. Led by Orada Kerdhong, President of Storied Place at MQDC. Manages the town centre\'s 211,200 sqm of lifestyle, entertainment, dining, and shopping space.',
+  },
+  {
     id: 'idyllias',
     name: 'Idyllias',
     description: 'Metaverse Platform',
@@ -102,6 +112,18 @@ export const initialOrgEntities: OrgEntity[] = [
     accentColor: 'var(--mqdc-blue)',
     summary:
       'MQDC\'s proprietary metaverse, developed with Accenture. Concept: "metta-verse" (from Thai word for kindness). Four layers at The Forestias: digital twin, virtual forest with MR gamification, virtual real estate, and fantasy realm with immersive experiences.',
+  },
+
+  // ── DTGO-Adjacent Entities ──
+  {
+    id: 'brights',
+    name: 'Brights',
+    description: 'Production & Events',
+    parentId: 'dtgo',
+    accentColor: 'var(--dtgo-green)',
+    summary:
+      'Production and events company with ~20 core staff. 70% owned by Thippaporn Ahriyavraromp, 30% by leadership team (three siblings including Yada, plus corporate strategist James). Operates as Happitat parade operator and primary producer of Thippaporn\'s creative concepts across DTGO properties. Previously operated The Pavilion at The Forestias and produced Cirque du Soleil shows in Thailand.',
+    keyMetrics: [{ label: 'Staff', value: '~20' }],
   },
 
   // ── Pillar 2: T&B Media Global ──

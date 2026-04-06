@@ -96,6 +96,16 @@ const stubEntities: { names: string[]; scope: string }[] = [
   { names: ['ITEC Entertainment', 'ITEC'], scope: 'Entertainment/attraction design partner' },
   { names: ['Two Bulls'], scope: 'Australian technology partner' },
   { names: ['Muang Thai Life', 'MTL'], scope: 'Insurance partner' },
+  // ── DTGO Entities with KB mentions but no dedicated files ──
+  { names: ['Brights'], scope: 'Production/events company; 70% owned by Thippaporn; Happitat parade operator' },
+  { names: ['Storied Place Management'], scope: 'MQDC entity managing The Happitat; led by Orada Kerdhong' },
+  { names: ['Crown Token'], scope: 'Fintech/Web3 entity within T&B/MQDC portfolio' },
+  { names: ["Metta's", 'Mettas'], scope: 'AI character companion app under MQDC Idyllias' },
+  { names: ['Herbie'], scope: 'Plant communication sensor project under MQDC' },
+  { names: ['Buzzybee'], scope: 'Third-party loyalty/promotions plugin integrated into Cloud 11' },
+  { names: ['Knowel', 'Knowel Corporation'], scope: 'Entity led by Suttha Ruengchaiphaiboon' },
+  { names: ['Gelepha Mindfulness City', 'GMC'], scope: 'Bhutan wellness/mindfulness city project referenced by Dr. Jwanwat' },
+  { names: ['Blocknut'], scope: 'Cloud gaming partner; 1,000+ game titles' },
 ];
 
 // ── Index Builder ──
