@@ -111,7 +111,12 @@ function EditContentModal({ open, onClose, content, onSave }: {
   onSave: (newContent: string) => void;
 }) {
   const [editValue, setEditValue] = useState(content);
-  useEffect(() => { if (open) setEditValue(content); }, [open, content]);
+  const prevOpenRef = useRef(false);
+  useEffect(() => {
+    // Only sync content when the modal first opens, not on background content changes
+    if (open && !prevOpenRef.current) setEditValue(content);
+    prevOpenRef.current = open;
+  }, [open, content]);
 
   if (!open) return null;
 
@@ -197,12 +202,17 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
   const [matchContextMenu, setMatchContextMenu] = useState<{ x: number; y: number; idx: number } | null>(null);
   const [dismissedItems, setDismissedItems] = useState<Set<number>>(new Set());
 
+  // Track live open state so async callbacks can check if modal is still open
+  const openRef = useRef(open);
+  useEffect(() => { openRef.current = open; }, [open]);
+
   // Per-match applied tracking: each match knows if it's been written to disk
   const isMatchApplied = useCallback((idx: number) => !!result?.matches[idx]?.appliedAt, [result]);
   const allApplied = useMemo(() => result?.matches?.every(m => m.appliedAt || m.isDuplicate) ?? false, [result]);
   // Legacy compat: readOnly = true only when every match is applied (no new matches from reprocess)
   const readOnly = allApplied;
   const hasUndismissedRejections = [...rejectedItems].some(i => !dismissedItems.has(i));
+  const pendingApproved = useMemo(() => new Set([...approvedItems].filter(i => !isMatchApplied(i))), [approvedItems, isMatchApplied]);
 
   // Fetch session on open
   useEffect(() => {
@@ -338,7 +348,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
 
   const handleApplyAndRefine = useCallback(async () => {
     if (!sessionId) return;
-    const willApply = approvedItems.size > 0;
+    const willApply = pendingApproved.size > 0;
     const willRefine = hasRefineData;
     if (willApply) setApplying(true);
     if (willRefine && !willApply) setReprocessing(true);
@@ -386,32 +396,42 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
         setApplying(false);
         setReprocessing(true);
 
-        // Build success message based on what happened
-        const appliedCount = approvedItems.size;
-        const successMsg = appliedCount > 0
-          ? { title: 'Applied & Reprocessing', subtitle: `${appliedCount} change(s) committed. Refining edits in background.` }
-          : { title: 'Reprocessing', subtitle: 'Refining edits in background. Reopen session to see updated results.' };
+        // Keep modal open — show reprocessing chips while AI refines
+        try {
+          const reprocessRes = await fetch('/api/intake/reprocess', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId,
+              clarificationAnswers: clarificationAnswersRef.current,
+              conflictResolutions,
+              contentEdits,
+            }),
+          });
 
-        // Close modal and show success immediately — reprocess runs in background
-        onClose();
-        onApplied?.();
-        onSuccess?.(successMsg);
+          // Refresh session data with updated results
+          const updated = await fetch(`/api/intake/session/${sessionId}`).then(r => r.json());
+          setSession(updated);
+          if (updated.result) setResult(normalizeResult(updated.result));
+          setContentEdits({});
+          setClarificationAnswers({});
+          setConflictResolutions({});
+          setStagedConflicts(new Set());
+          setReprocessing(false);
 
-        // Fire reprocess in background (modal is already closed)
-        fetch('/api/intake/reprocess', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId,
-            clarificationAnswers: clarificationAnswersRef.current,
-            conflictResolutions,
-            contentEdits,
-          }),
-        }).then(() => {
-          onApplied?.(); // Refresh parent again when reprocess completes
-        }).catch(() => {
-          // Reprocess failure — user will see stale results when they reopen
-        });
+          const appliedCount = approvedItems.size;
+          const successMsg = appliedCount > 0
+            ? { title: 'Applied & Reprocessed', subtitle: `${appliedCount} change(s) committed. Results updated with your edits.` }
+            : { title: 'Reprocessed', subtitle: 'Results updated with your edits.' };
+          onApplied?.();
+          if (openRef.current) {
+            onSuccess?.(successMsg);
+            onClose();
+          }
+        } catch {
+          setReprocessing(false);
+          setApplyResult('Error: Reprocess failed');
+        }
 
         return;
       }
@@ -419,8 +439,8 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
       // Refresh parent AFTER apply-only operations
       onApplied?.();
 
-      // Close modal after apply-only
-      if (approvedItems.size > 0) {
+      // Close modal after apply-only (only if modal is still open)
+      if (approvedItems.size > 0 && openRef.current) {
         const appliedCount = approvedItems.size;
         onSuccess?.({ title: 'Changes Applied', subtitle: `${appliedCount} change(s) committed to git.` });
         onClose();
@@ -587,6 +607,12 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
           if (isMatchApplied(idx)) return <span style={{ fontSize: '12px', color: 'var(--text-secondary)', opacity: 0.4 }}>—</span>;
           const answer = clarificationAnswersRef.current[idx];
           const answered = answer?.selected || answer?.note;
+          if (reprocessing && answered) return (
+            <div className="flex items-center gap-1">
+              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--jf-lavender)' }} />
+              <span style={{ fontSize: '10px', color: 'var(--jf-lavender)', fontWeight: 600 }}>Re-processing…</span>
+            </div>
+          );
           return answered ? <Badge color="info">Staged</Badge> : <Badge color="default">?</Badge>;
         }
 
@@ -674,13 +700,13 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
           return <Badge color="default">—</Badge>;
         }
 
-        if (applying && approvedItems.has(idx)) return (
+        if (applying && pendingApproved.has(idx)) return (
           <div className="flex items-center gap-1">
             <Loader2 size={14} className="animate-spin" style={{ color: 'var(--dtgo-green)' }} />
             <span style={{ fontSize: '10px', color: 'var(--dtgo-green)', fontWeight: 600 }}>Applying…</span>
           </div>
         );
-        if (reprocessing && idx in contentEdits) return (
+        if (reprocessing && (idx in contentEdits || idx in conflictResolutions)) return (
           <div className="flex items-center gap-1">
             <Loader2 size={14} className="animate-spin" style={{ color: 'var(--jf-lavender)' }} />
             <span style={{ fontSize: '10px', color: 'var(--jf-lavender)', fontWeight: 600 }}>Reprocessing…</span>
@@ -762,7 +788,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
         );
       },
     },
-  ], [approvedItems, rejectedItems, dismissedItems, contentEdits, clarificationAnswers, applying, reprocessing, readOnly, isMatchApplied, rejectionReasons, showReasonInput, aiRecommendations, reevalLoading]);
+  ], [approvedItems, pendingApproved, rejectedItems, dismissedItems, contentEdits, clarificationAnswers, applying, reprocessing, readOnly, isMatchApplied, rejectionReasons, showReasonInput, aiRecommendations, reevalLoading]);
 
   return (
     <>
@@ -882,7 +908,7 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
                             </button>
                           );
                         })()}
-                        {(approvedItems.size > 0 || hasRefineData) && (
+                        {(pendingApproved.size > 0 || hasRefineData) && (
                           <button onClick={handleApplyAndRefine} disabled={applying || reprocessing} style={{
                             display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', borderRadius: '8px',
                             fontSize: '12px', fontWeight: 600, background: 'rgba(216, 131, 10, 0.15)',
@@ -890,18 +916,18 @@ export function SessionReviewModal({ open, onClose, sessionId, onApplied, onSucc
                             cursor: applying || reprocessing ? 'wait' : 'pointer',
                           }}>
                             {applying || reprocessing ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                            {approvedItems.size > 0 && hasRefineData
-                              ? `Apply ${approvedItems.size} & Refine`
-                              : approvedItems.size > 0
-                                ? `Apply ${approvedItems.size} Change${approvedItems.size !== 1 ? 's' : ''}`
+                            {pendingApproved.size > 0 && hasRefineData
+                              ? `Apply ${pendingApproved.size} & Refine`
+                              : pendingApproved.size > 0
+                                ? `Apply ${pendingApproved.size} Change${pendingApproved.size !== 1 ? 's' : ''}`
                                 : 'Refine Answers'}
                           </button>
                         )}
                         <span style={{ fontSize: '11px', color: 'var(--text-secondary)', opacity: 0.6, fontStyle: 'italic' }}>
-                          {approvedItems.size > 0 && hasRefineData
+                          {pendingApproved.size > 0 && hasRefineData
                             ? 'Will apply approved changes, then refine with your answers'
-                            : approvedItems.size > 0
-                              ? `${approvedItems.size} change${approvedItems.size !== 1 ? 's' : ''} ready to commit`
+                            : pendingApproved.size > 0
+                              ? `${pendingApproved.size} change${pendingApproved.size !== 1 ? 's' : ''} ready to commit`
                               : hasRefineData
                                 ? 'Will send your answers to refine suggestions'
                                 : 'Approve matches to apply, answer questions to refine'}

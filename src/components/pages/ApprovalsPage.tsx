@@ -264,7 +264,7 @@ export function ApprovalsPage() {
       meta: { style: { width: '14%', verticalAlign: 'middle' } },
       cell: ({ row }) => (
         <span style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-          {new Date(row.original.appliedAt!).toLocaleDateString(undefined, {
+          {new Date(row.original.appliedAt || row.original.resolvedAt || row.original.timestamp).toLocaleDateString(undefined, {
             month: 'short', day: 'numeric', year: 'numeric',
           })}
         </span>

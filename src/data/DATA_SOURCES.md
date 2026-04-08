@@ -6,7 +6,7 @@ When information about DTGO entities is updated, it must be reflected in ALL of 
 |---|---|---|
 | `/knowledge-base/*.md` | Canonical source of truth — full prose, metrics, sources | When new info arrives (via INTAKE.md process) |
 | `src/data/orgData.ts` | Org chart: hierarchy, leaders, summaries, metrics | After any KB update that changes leadership, structure, or key metrics |
-| `src/data/charts.json` | Chart datasets (investment allocation, REIT income, etc.) | After any KB update that changes financial figures |
+| `knowledge-base/data/charts.json` | Chart datasets (investment allocation, REIT income, etc.) | After any KB update that changes financial figures |
 | Wiki.html (legacy) | Original static wiki — modalData object | Deprecated; KB is now the source of truth |
 
 ## Entity-to-File Mapping

@@ -23,7 +23,12 @@ function EditContentModal({ open, onClose, content, onSave }: {
   onSave: (newContent: string) => void;
 }) {
   const [editValue, setEditValue] = useState(content);
-  useEffect(() => { if (open) setEditValue(content); }, [open, content]);
+  const prevOpenRef = useRef(false);
+  useEffect(() => {
+    // Only sync content when the modal first opens, not on background content changes
+    if (open && !prevOpenRef.current) setEditValue(content);
+    prevOpenRef.current = open;
+  }, [open, content]);
 
   if (!open) return null;
 
@@ -200,6 +205,8 @@ export function IntakePage() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
 
   // Fetch providers and seed localStorage
   useEffect(() => {
@@ -242,8 +249,11 @@ export function IntakePage() {
     if (!sessionId) return;
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/intake/session/${sessionId}`);
+        const currentId = sessionId;
+        const res = await fetch(`/api/intake/session/${currentId}`);
+        if (sessionIdRef.current !== currentId) return;
         const session = await res.json();
+        if (sessionIdRef.current !== currentId) return;
         if (session.status === 'ready') {
           setResult(normalizeResult(session.result));
           setProcessing(false);

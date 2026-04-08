@@ -1359,7 +1359,7 @@ EXISTING SECTION CONTENT:
 ${sectionContent || '(section does not exist yet — will be created)'}
 
 PROPOSED ADDITION:
-${match.content}
+${contentToApply}
 
 SCHEMA RULES:
 - Person entries MUST use: ### Name — Role, Org\\n\\n\`Tag\` · \`Org\`\\n\\nNarrative prose paragraphs\\n\\n**Sources:** citation
@@ -1468,11 +1468,15 @@ Return ONLY valid JSON:
           session.appliedAt = now;
         }
 
-        // Check if fully resolved (every match decided as approved or dismissed)
+        // Check if fully resolved (every match decided, applied, or duplicate)
         const matchCount = session.result?.matches?.length || 0;
         const mergedApprovals = session.approvals;
-        const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => String(i))
-          .every(idx => mergedApprovals[idx] === 'approved' || mergedApprovals[idx] === 'dismissed');
+        const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => {
+          const idx = String(i);
+          const match = session.result?.matches[i];
+          return mergedApprovals[idx] === 'approved' || mergedApprovals[idx] === 'dismissed'
+            || match?.appliedAt || match?.isDuplicate;
+        }).every(Boolean);
         if (allResolved) {
           session.resolvedAt = new Date().toISOString();
         }
@@ -1544,10 +1548,14 @@ Return ONLY valid JSON:
             session.rejectionReasons = { ...(session.rejectionReasons || {}), ...rejectionReasons };
           }
 
-          // Check if fully resolved
+          // Check if fully resolved (every match decided, applied, or duplicate)
           const matchCount = session.result?.matches?.length || 0;
-          const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => String(i))
-            .every(idx => session.approvals[idx] === 'approved' || session.approvals[idx] === 'dismissed');
+          const allResolved = matchCount > 0 && Array.from({ length: matchCount }, (_, i) => {
+            const idx = String(i);
+            const match = session.result?.matches[i];
+            return session.approvals[idx] === 'approved' || session.approvals[idx] === 'dismissed'
+              || match?.appliedAt || match?.isDuplicate;
+          }).every(Boolean);
           if (allResolved) {
             session.resolvedAt = new Date().toISOString();
           }
@@ -1689,6 +1697,7 @@ Respond with ONLY valid JSON (no markdown fences):
         try {
           // Only call AI if there are actually matches to refine
           let refinedMatches: any[] = [];
+          let parsedConflicts: string[] | null = null;
           if (matchesToRefine.length > 0) {
             const reprocessPrompt = `You previously analyzed source text and returned intake suggestions. The user has edited some matches or answered clarification questions. Refine ONLY the items below based on their input.
 
@@ -1732,6 +1741,7 @@ Return ONLY valid JSON with this structure, no markdown fences:
             const content = providerConfigs.claude.extractText(apiData);
             const parsed = parseAiJson(content);
             refinedMatches = Array.isArray(parsed.matches) ? parsed.matches : [];
+            parsedConflicts = Array.isArray(parsed.conflicts) ? parsed.conflicts : [];
           }
 
           // Append clarification answers to the source document
@@ -1767,12 +1777,13 @@ Return ONLY valid JSON with this structure, no markdown fences:
 
           const finalResult = {
             matches: finalMatches,
-            conflicts: session.result?.conflicts || [],
+            conflicts: parsedConflicts !== null ? parsedConflicts : (session.result?.conflicts || []),
             newFiles: session.result?.newFiles || [],
             summary: session.result?.summary || '',
           };
 
           session.result = finalResult;
+          session.matchCount = finalMatches.length;
           session.approvals = newApprovals;
           // Keep appliedAt — those items were already applied to KB
           delete session.resolvedAt; // session has new items to review

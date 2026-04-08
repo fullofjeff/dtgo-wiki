@@ -18,10 +18,22 @@ export function getSessionState(session: Pick<IntakeSession, 'status' | 'approva
   }
   if (session.status === 'error') return session.resolvedAt ? 'resolved' : 'error';
 
-  const approvalValues = Object.values(session.approvals || {});
-  const decisionCount = approvalValues.length;
-  const totalMatches = session.matchCount || session.result?.matches?.length || 0;
+  const approvals = session.approvals || {};
+  const approvalValues = Object.values(approvals);
+  // Use actual match count (result may have grown after reprocessing)
+  const totalMatches = session.result?.matches?.length || session.matchCount || 0;
   const hasRejected = approvalValues.some(v => v === 'rejected');
+
+  // Count decisions: explicit approvals + matches already applied or flagged as duplicate without an approval entry
+  let decisionCount = approvalValues.length;
+  const matches = session.result?.matches as Array<{ appliedAt?: string; isDuplicate?: boolean }> | undefined;
+  if (matches) {
+    for (let i = 0; i < matches.length; i++) {
+      if (!(String(i) in approvals) && (matches[i]?.appliedAt || matches[i]?.isDuplicate)) {
+        decisionCount++;
+      }
+    }
+  }
   const allDecided = totalMatches > 0 && decisionCount >= totalMatches;
 
   // If explicitly resolved, honour that regardless of partial approval state
@@ -30,7 +42,7 @@ export function getSessionState(session: Pick<IntakeSession, 'status' | 'approva
 
   // Applied but not yet resolved — check if all matches were decided
   if (session.appliedAt) {
-    return allDecided && !hasRejected ? 'applied' : 'partially_applied';
+    return allDecided ? 'applied' : 'partially_applied';
   }
 
   if (allDecided && approvalValues.every(v => v === 'rejected' || v === 'dismissed')) {
